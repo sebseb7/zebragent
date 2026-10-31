@@ -1,0 +1,14 @@
+{
+  "name": "zebra-agent-ui",
+  "version": "0.1.0",
+  "description": "Zebra Agent Manager Tauri v2 Application",
+  "scripts": {
+    "tauri": "set \"PATH=%USERPROFILE%\\.cargo\\bin;%PATH%\" && npx @tauri-apps/cli",
+    "dev": "set \"PATH=%USERPROFILE%\\.cargo\\bin;%PATH%\" && npx @tauri-apps/cli dev",
+    "build": "set \"PATH=%USERPROFILE%\\.cargo\\bin;%PATH%\" && npx @tauri-apps/cli build",
+    "release": "set \"PATH=%USERPROFILE%\\.cargo\\bin;%PATH%\" && cargo build --release --manifest-path src-tauri/Cargo.toml"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}

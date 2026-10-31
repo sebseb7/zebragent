@@ -1,0 +1,574 @@
+use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
+use std::process::{Child, Command};
+use std::sync::Mutex;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+use tauri::{
+    menu::{MenuBuilder, MenuItemBuilder},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Emitter, Manager,
+};
+use winreg::enums::*;
+use winreg::RegKey;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+// Embed ZebraAgent.exe into the binary
+const EMBEDDED_AGENT: &[u8] = include_bytes!("../../service/ZebraAgent.exe");
+
+// Track spawned temporary background process
+static SPAWNED_AGENT: Mutex<Option<Child>> = Mutex::new(None);
+
+// Circular in-memory log buffer for ZebraAgent.exe output
+static AGENT_LOGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+// App handle storage for log emission
+static APP_HANDLE: Mutex<Option<tauri::AppHandle>> = Mutex::new(None);
+
+#[allow(dead_code)]
+fn append_agent_log(line: String) {
+    if let Ok(guard) = APP_HANDLE.lock() {
+        if let Some(ref app) = *guard {
+            let _ = app.emit("agent-stdout", &line);
+        }
+    }
+    let mut logs = AGENT_LOGS.lock().unwrap();
+    if logs.len() > 1000 {
+        logs.remove(0);
+    }
+    logs.push(line);
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
+pub struct RegistryConfig {
+    pub api_url: String,
+    pub printer_ip: String,
+    pub port: String,
+    pub token: String,
+    pub local_addr: String,
+    pub name: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct SimpleStatus {
+    pub running: bool,
+    pub background: bool,
+}
+
+fn unpack_embedded_agent() -> Result<PathBuf, String> {
+    let temp_dir = std::env::temp_dir().join("ZebraAgent");
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let target = temp_dir.join("ZebraAgent.exe");
+
+    let needs_write = match std::fs::metadata(&target) {
+        Ok(meta) => meta.len() != EMBEDDED_AGENT.len() as u64,
+        Err(_) => true,
+    };
+
+    if needs_write {
+        kill_temp_agent();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        std::fs::write(&target, EMBEDDED_AGENT)
+            .map_err(|e| format!("Failed to unpack ZebraAgent.exe to {:?}: {}", target, e))?;
+    }
+
+    Ok(target)
+}
+
+fn get_persistent_agent_path() -> Result<PathBuf, String> {
+    let dir = if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        PathBuf::from(local).join("ZebraAgent")
+    } else {
+        std::env::temp_dir().join("ZebraAgent")
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let target = dir.join("ZebraAgent.exe");
+
+    let needs_write = match std::fs::metadata(&target) {
+        Ok(meta) => meta.len() != EMBEDDED_AGENT.len() as u64,
+        Err(_) => true,
+    };
+
+    if needs_write {
+        kill_temp_agent();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::fs::write(&target, EMBEDDED_AGENT)
+            .map_err(|e| format!("Failed to write ZebraAgent.exe to {:?}: {}", target, e))?;
+    }
+
+    Ok(target)
+}
+
+fn is_process_running(image_name: &str) -> bool {
+    let mut cmd = Command::new("tasklist.exe");
+    cmd.args(["/FI", &format!("IMAGENAME eq {}", image_name), "/NH"]);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    if let Ok(out) = cmd.output() {
+        let stdout = String::from_utf8_lossy(&out.stdout).to_lowercase();
+        return stdout.contains(&image_name.to_lowercase());
+    }
+    false
+}
+
+fn kill_temp_agent() {
+    let mut lock = SPAWNED_AGENT.lock().unwrap();
+    if let Some(mut child) = lock.take() {
+        let _ = child.kill();
+    }
+}
+
+fn launch_agent_process(target: &PathBuf) -> Result<(), String> {
+    if is_process_running("ZebraAgent.exe") {
+        return Ok(());
+    }
+
+    let log_file_path = std::env::temp_dir().join("ZebraAgent").join("agent.log");
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(true)
+        .open(&log_file_path)
+        .map_err(|e| format!("Failed to open log file: {}", e))?;
+
+    let log_err = log_file.try_clone().map_err(|e| format!("Clone error: {}", e))?;
+
+    let mut cmd = Command::new(target);
+    cmd.stdout(log_file);
+    cmd.stderr(log_err);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let child = cmd.spawn().map_err(|e| format!("Failed to launch agent ({:?}): {}", target, e))?;
+
+    let mut lock = SPAWNED_AGENT.lock().unwrap();
+    *lock = Some(child);
+    Ok(())
+}
+
+fn launch_agent_from_temp() -> Result<(), String> {
+    let target = unpack_embedded_agent()?;
+    launch_agent_process(&target)
+}
+
+fn launch_persistent_agent() -> Result<(), String> {
+    let target = get_persistent_agent_path()?;
+    launch_agent_process(&target)
+}
+
+fn check_is_scm_service() -> bool {
+    let mut cmd_sc = Command::new("sc.exe");
+    cmd_sc.args(["query", "ZebraAgent"]);
+    #[cfg(windows)]
+    cmd_sc.creation_flags(CREATE_NO_WINDOW);
+    if let Ok(out) = cmd_sc.output() {
+        let stdout = String::from_utf8_lossy(&out.stdout).to_uppercase();
+        if !stdout.contains("1060") && (out.status.success() || stdout.contains("STATE")) {
+            return true;
+        }
+    }
+    false
+}
+
+fn check_is_background_installed() -> bool {
+    // 1. Check HKCU Run key (primary standard user auto-start)
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    if let Ok(run_key) = hkcu.open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Run") {
+        if run_key.get_value::<String, _>("ZebraAgent").is_ok() {
+            return true;
+        }
+    }
+
+    // 2. Check user scheduled task
+    let mut cmd_task = Command::new("schtasks.exe");
+    cmd_task.args(["/Query", "/TN", "ZebraAgent"]);
+    #[cfg(windows)]
+    cmd_task.creation_flags(CREATE_NO_WINDOW);
+    if let Ok(out) = cmd_task.output() {
+        if out.status.success() {
+            return true;
+        }
+    }
+
+    // 3. Check Windows SCM service
+    if check_is_scm_service() {
+        return true;
+    }
+
+    false
+}
+
+#[tauri::command]
+async fn get_registry_config() -> Result<RegistryConfig, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let key = match hkcu.open_subkey(r"Software\ZebraAgent") {
+            Ok(k) => k,
+            Err(_) => {
+                return Ok(RegistryConfig {
+                    api_url: "http://localhost:4209".to_string(),
+                    printer_ip: "192.168.188.47".to_string(),
+                    port: "41783".to_string(),
+                    ..Default::default()
+                });
+            }
+        };
+
+        let api_url: String = key.get_value("ApiUrl").unwrap_or_default();
+        let printer_ip: String = key.get_value("PrinterIp").unwrap_or_default();
+        let port: String = key.get_value("Port").unwrap_or_else(|_| {
+            if let Ok(dw) = key.get_value::<u32, _>("PortDWord") {
+                dw.to_string()
+            } else {
+                "41783".to_string()
+            }
+        });
+        let token: String = key.get_value("Token").unwrap_or_default();
+        let local_addr: String = key.get_value("LocalAddr").unwrap_or_default();
+        let name: String = key.get_value("Name").unwrap_or_default();
+
+        Ok(RegistryConfig {
+            api_url,
+            printer_ip,
+            port,
+            token,
+            local_addr,
+            name,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn save_registry_config(api_url: String, printer_ip: String, port: Option<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let (key, _) = hkcu
+            .create_subkey(r"Software\ZebraAgent")
+            .map_err(|e| format!("Failed to open/create HKCU\\Software\\ZebraAgent: {}", e))?;
+
+        let trimmed_api = api_url.trim();
+        let trimmed_printer = printer_ip.trim();
+
+        key.set_value("ApiUrl", &trimmed_api)
+            .map_err(|e| format!("Failed to set ApiUrl: {}", e))?;
+
+        key.set_value("PrinterIp", &trimmed_printer)
+            .map_err(|e| format!("Failed to set PrinterIp: {}", e))?;
+
+        if let Some(p) = port {
+            let trimmed_p = p.trim();
+            if !trimmed_p.is_empty() {
+                key.set_value("Port", &trimmed_p)
+                    .map_err(|e| format!("Failed to set Port: {}", e))?;
+            }
+        }
+
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn get_service_status() -> Result<SimpleStatus, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let running = is_process_running("ZebraAgent.exe");
+        let background = check_is_background_installed();
+        Ok(SimpleStatus { running, background })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn get_agent_logs() -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let temp_log = std::env::temp_dir().join("ZebraAgent").join("agent.log");
+        let prog_log = if let Ok(pd) = std::env::var("ProgramData") {
+            PathBuf::from(pd).join("ZebraAgent").join("agent.log")
+        } else {
+            PathBuf::new()
+        };
+
+        let target_file = if temp_log.is_file() {
+            Some(temp_log)
+        } else if prog_log.is_file() {
+            Some(prog_log)
+        } else {
+            None
+        };
+
+        if let Some(path) = target_file {
+            if let Ok(file) = std::fs::File::open(path) {
+                let reader = BufReader::new(file);
+                let lines: Vec<String> = reader.lines().flatten().collect();
+                let start = if lines.len() > 300 { lines.len() - 300 } else { 0 };
+                return Ok(lines[start..].to_vec());
+            }
+        }
+
+        let logs = AGENT_LOGS.lock().unwrap().clone();
+        Ok(logs)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn install_service() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let target = get_persistent_agent_path()?;
+        let target_str = target.to_string_lossy().to_string();
+
+        // 1. Install user-level background auto-start via HKCU Run key (no admin / elevation required)
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let (run_key, _) = hkcu
+            .create_subkey(r"Software\Microsoft\Windows\CurrentVersion\Run")
+            .map_err(|e| format!("Registry access error: {}", e))?;
+
+        let run_cmd = format!("\"{}\"", target_str);
+        run_key
+            .set_value("ZebraAgent", &run_cmd)
+            .map_err(|e| format!("Failed to register background startup: {}", e))?;
+
+        // 2. Best-effort Task Scheduler (optional, ignores failure if non-admin)
+        let mut cmd = Command::new("schtasks.exe");
+        cmd.args([
+            "/Create",
+            "/TN", "ZebraAgent",
+            "/TR", &run_cmd,
+            "/SC", "ONLOGON",
+            "/RL", "LIMITED",
+            "/F",
+        ]);
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        let _ = cmd.output();
+
+        // 3. Start persistent background process immediately if not running
+        if !is_process_running("ZebraAgent.exe") {
+            let _ = launch_persistent_agent();
+        }
+
+        Ok("Installed as background service".to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn uninstall_service() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        // 1. Remove from HKCU Run key
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        if let Ok((run_key, _)) = hkcu.create_subkey(r"Software\Microsoft\Windows\CurrentVersion\Run") {
+            let _ = run_key.delete_value("ZebraAgent");
+        }
+
+        // 2. Remove Task Scheduler task if it exists
+        let mut cmd = Command::new("schtasks.exe");
+        cmd.args(["/Delete", "/TN", "ZebraAgent", "/F"]);
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        let _ = cmd.output();
+
+        // 3. Clean up SCM service if one existed
+        let mut sc_cmd = Command::new("sc.exe");
+        sc_cmd.args(["delete", "ZebraAgent"]);
+        #[cfg(windows)]
+        sc_cmd.creation_flags(CREATE_NO_WINDOW);
+        let _ = sc_cmd.output();
+
+        // 4. Terminate running agent process
+        kill_temp_agent();
+        let mut kill_cmd = Command::new("taskkill.exe");
+        kill_cmd.args(["/F", "/IM", "ZebraAgent.exe"]);
+        #[cfg(windows)]
+        kill_cmd.creation_flags(CREATE_NO_WINDOW);
+        let _ = kill_cmd.output();
+
+        Ok("Uninstalled background service".to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn clear_agent_logs() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let mut logs = AGENT_LOGS.lock().unwrap();
+        logs.clear();
+
+        let temp_log = std::env::temp_dir().join("ZebraAgent").join("agent.log");
+        if temp_log.is_file() {
+            let _ = std::fs::write(&temp_log, "");
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn unpair_agent() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        // 1. Clear Token and Name in HKCU registry
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        if let Ok((key, _)) = hkcu.create_subkey(r"Software\ZebraAgent") {
+            let _ = key.set_value("Token", &"");
+            let _ = key.set_value("Name", &"");
+        }
+
+        // 2. Restart agent process/service to immediately drop upstream connection
+        if check_is_scm_service() {
+            let mut stop = Command::new("sc.exe");
+            stop.args(["stop", "ZebraAgent"]);
+            #[cfg(windows)]
+            stop.creation_flags(CREATE_NO_WINDOW);
+            let _ = stop.output();
+
+            std::thread::sleep(std::time::Duration::from_millis(400));
+
+            let mut start = Command::new("sc.exe");
+            start.args(["start", "ZebraAgent"]);
+            #[cfg(windows)]
+            start.creation_flags(CREATE_NO_WINDOW);
+            let _ = start.output();
+        } else {
+            kill_temp_agent();
+            let mut kill_cmd = Command::new("taskkill.exe");
+            kill_cmd.args(["/F", "/IM", "ZebraAgent.exe"]);
+            #[cfg(windows)]
+            kill_cmd.creation_flags(CREATE_NO_WINDOW);
+            let _ = kill_cmd.output();
+
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            if check_is_background_installed() {
+                let _ = launch_persistent_agent();
+            } else {
+                let _ = launch_agent_from_temp();
+            }
+        }
+
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
+        .setup(|app| {
+            if cfg!(debug_assertions) {
+                app.handle().plugin(
+                    tauri_plugin_log::Builder::default()
+                        .level(log::LevelFilter::Info)
+                        .build(),
+                )?;
+            }
+
+            // Store app handle for event emissions
+            if let Ok(mut guard) = APP_HANDLE.lock() {
+                *guard = Some(app.handle().clone());
+            }
+
+            // Startup requirement:
+            // 1. Unpack service\ZebraAgent.exe to temp folder
+            // 2. Check if background service/autostart is installed; if not, launch agent from temp
+            let _ = unpack_embedded_agent();
+            let is_bg = check_is_background_installed();
+            if is_bg {
+                if !is_process_running("ZebraAgent.exe") {
+                    let _ = launch_persistent_agent();
+                }
+            } else {
+                let _ = launch_agent_from_temp();
+            }
+
+            // Taskbar tray icon and menu setup
+            let open_item = MenuItemBuilder::with_id("open", "Open").build(app)?;
+            let exit_item = MenuItemBuilder::with_id("exit", "Exit").build(app)?;
+
+            let tray_menu = MenuBuilder::new(app)
+                .item(&open_item)
+                .separator()
+                .item(&exit_item)
+                .build()?;
+
+            let icon = app.default_window_icon().cloned().expect("default window icon is present");
+
+            let _tray = TrayIconBuilder::new()
+                .icon(icon)
+                .tooltip("Zebra Agent Manager")
+                .menu(&tray_menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| {
+                    match event.id().as_ref() {
+                        "open" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.unminimize();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        "exit" => {
+                            if !check_is_background_installed() {
+                                kill_temp_agent();
+                            }
+                            app.exit(0);
+                        }
+                        _ => {}
+                    }
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let app = tray.app_handle();
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.unminimize();
+                            let _ = window.set_focus();
+                        }
+                    }
+                })
+                .build(app)?;
+
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
+        .invoke_handler(tauri::generate_handler![
+            get_registry_config,
+            save_registry_config,
+            get_service_status,
+            get_agent_logs,
+            clear_agent_logs,
+            install_service,
+            uninstall_service,
+            unpair_agent
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while building tauri application");
+}

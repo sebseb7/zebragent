@@ -1,0 +1,135 @@
+package main
+
+import (
+	"errors"
+	"net"
+	"strings"
+)
+
+const (
+	AgentVersion  = "1"
+	AgentBasePath = "/api/agent"
+)
+
+// Config contains the service configuration.
+type Config struct {
+	Token        string // persistent token obtained from pairing
+	AgentName    string // friendly name assigned to agent
+	ApiUrl       string // base domain only (e.g. https://api.example.com)
+	PrinterIp    string // printer IP address (TCP 9100)
+	EventsPath   string // default "/events" (appended under /api/agent)
+	StatePath    string // default "/state" (appended under /api/agent)
+	PairPath     string // default "/pair" (appended under /api/agent)
+	LocalAddr    string // local monitor address, default "127.0.0.1:41782"
+	ClientSerial string // optional serial override passed via flag
+	ClientModel  string // optional model override passed via flag
+}
+
+// CleanApiUrl normalizes the API base domain, stripping any trailing slashes or /api/agent.
+func CleanApiUrl(raw string) string {
+	u := strings.TrimRight(strings.TrimSpace(raw), "/")
+	u = strings.TrimSuffix(u, AgentBasePath)
+	u = strings.TrimRight(u, "/")
+	if u != "" && !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+		if strings.HasPrefix(u, "localhost") || strings.HasPrefix(u, "127.0.0.1") {
+			u = "http://" + u
+		} else {
+			u = "https://" + u
+		}
+	}
+	return u
+}
+
+// Endpoint builds the full URL: <ApiUrl domain> + /api/agent/<subpath>.
+func (c *Config) Endpoint(subpath string) string {
+	domain := CleanApiUrl(c.ApiUrl)
+	sub := strings.TrimPrefix(strings.TrimSpace(subpath), "/")
+	sub = strings.TrimPrefix(sub, "api/agent/")
+	sub = strings.TrimPrefix(sub, "api/agent")
+	sub = strings.TrimPrefix(sub, "/")
+
+	if sub == "" {
+		return domain + AgentBasePath
+	}
+	return domain + AgentBasePath + "/" + sub
+}
+
+// LoadConfig reads configuration:
+// - In service mode: strictly and only from HKLM\SOFTWARE\ZebraAgent
+// - In non-service mode: reads HKLM as base, overridden by command line parameters
+func LoadConfig(isService bool) (*Config, error) {
+	c := readPlatformConfig()
+
+	// In non-service mode, command line parameters take precedence
+	if !isService {
+		if flagApiUrl != "" {
+			c.ApiUrl = flagApiUrl
+		}
+		if flagPrinterIp != "" {
+			c.PrinterIp = flagPrinterIp
+		}
+		if flagToken != "" {
+			c.Token = flagToken
+		}
+		if flagLocalAddr != "" {
+			c.LocalAddr = flagLocalAddr
+		}
+		if flagClientSerial != "" {
+			c.ClientSerial = flagClientSerial
+		}
+		if flagClientModel != "" {
+			c.ClientModel = flagClientModel
+		}
+	}
+
+	c.Token = strings.TrimSpace(c.Token)
+	c.PrinterIp = strings.TrimSpace(c.PrinterIp)
+	c.ApiUrl = CleanApiUrl(c.ApiUrl)
+
+	if c.EventsPath == "" {
+		c.EventsPath = "/events"
+	}
+	if c.StatePath == "" {
+		c.StatePath = "/state"
+	}
+	if c.PairPath == "" {
+		c.PairPath = "/pair"
+	}
+	if c.LocalAddr == "" {
+		c.LocalAddr = "127.0.0.1:41782"
+	}
+
+	if c.PrinterIp != "" && net.ParseIP(c.PrinterIp) == nil {
+		if isService {
+			return nil, errors.New(`PrinterIp invalid in HKLM\SOFTWARE\ZebraAgent\PrinterIp`)
+		}
+		return nil, errors.New(`PrinterIp invalid (specify valid IP via -printerip or set in HKLM\SOFTWARE\ZebraAgent\PrinterIp)`)
+	}
+
+	return c, nil
+}
+
+// SaveToken persists the token to registry.
+func SaveToken(token string) error {
+	return savePlatformToken(token)
+}
+
+// SaveApiUrl persists the ApiUrl domain to registry.
+func SaveApiUrl(apiUrl string) error {
+	return savePlatformApiUrl(apiUrl)
+}
+
+// SavePrinterIp persists the PrinterIp to registry.
+func SavePrinterIp(printerIp string) error {
+	return savePlatformPrinterIp(printerIp)
+}
+
+// SavePort persists the active local monitor port to HKCU on launch.
+func SavePort(port int) error {
+	return savePlatformPort(port)
+}
+
+// SaveName persists the assigned agent name to registry.
+func SaveName(name string) error {
+	return savePlatformName(name)
+}
