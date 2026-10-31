@@ -4,7 +4,8 @@ const tauriInvoke = window.__TAURI__ ? window.__TAURI__.core.invoke : async (cmd
   if (cmd === "get_registry_config") {
     return {
       api_url: "http://localhost:4209",
-      printer_ip: "192.168.188.47",
+      printer_ip: "",
+      zpl_printers: [],
       port: "41783",
       token: "40781f20191c54d8f3e72e2a72cb835f92915a645eaa7ca37f10d85dabfe3d4c",
       local_addr: "127.0.0.1:41782",
@@ -19,7 +20,6 @@ const tauriInvoke = window.__TAURI__ ? window.__TAURI__.core.invoke : async (cmd
       "2026/10/31 22:17:55 Local monitor listening on http://127.0.0.1:41783",
       "2026/10/31 22:17:55 SSE connected to http://localhost:4209/api/agent/events",
       "2026/10/31 22:17:55 Registry read [HKCU\\Software\\ZebraAgent]: ApiUrl=\"http://localhost:4209\"",
-      "2026/10/31 22:17:55 Registry read [HKCU\\Software\\ZebraAgent]: PrinterIp=\"192.168.188.47\"",
       "2026/10/31 22:17:55 Registry read [HKCU\\Software\\ZebraAgent]: Port=\"41783\""
     ];
   }
@@ -38,7 +38,8 @@ const sseStatusPill = document.getElementById("sseStatusPill");
 const sseStatusText = document.getElementById("sseStatusText");
 
 const inputApiUrl = document.getElementById("inputApiUrl");
-const inputPrinterIp = document.getElementById("inputPrinterIp");
+const zplPrintersList = document.getElementById("zplPrintersList");
+const btnAddZplPrinter = document.getElementById("btnAddZplPrinter");
 const inputPort = document.getElementById("inputPort");
 
 const statRunning = document.getElementById("statRunning");
@@ -203,12 +204,71 @@ async function unpairAgent() {
   }
 }
 
+// Dynamic zplprinters list management
+function renderZplPrinters(printers) {
+  if (!zplPrintersList) return;
+  zplPrintersList.innerHTML = "";
+  const list = Array.isArray(printers) && printers.length > 0 ? printers : [""];
+  list.forEach(ip => addZplPrinterRow(ip));
+}
+
+function addZplPrinterRow(ip = "") {
+  if (!zplPrintersList) return;
+  const row = document.createElement("div");
+  row.className = "zpl-printer-row";
+  row.style.display = "flex";
+  row.style.gap = "6px";
+  row.style.alignItems = "center";
+
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "input-zpl-printer";
+  input.placeholder = "e.g. 192.168.1.100";
+  input.value = ip;
+  input.autocomplete = "off";
+  input.style.flex = "1";
+  input.style.padding = "5px 9px";
+  input.style.fontSize = "0.84rem";
+
+  const btnDel = document.createElement("button");
+  btnDel.type = "button";
+  btnDel.className = "btn btn-outline btn-sm";
+  btnDel.textContent = "✕";
+  btnDel.title = "Remove printer";
+  btnDel.style.padding = "3px 7px";
+  btnDel.style.fontSize = "0.72rem";
+  btnDel.style.color = "#f87171";
+  btnDel.style.borderColor = "rgba(248, 113, 113, 0.35)";
+
+  btnDel.addEventListener("click", () => {
+    row.remove();
+    if (zplPrintersList.children.length === 0) {
+      addZplPrinterRow("");
+    }
+  });
+
+  row.appendChild(input);
+  row.appendChild(btnDel);
+  zplPrintersList.appendChild(row);
+}
+
+function getZplPrintersValues() {
+  if (!zplPrintersList) return [];
+  const inputs = zplPrintersList.querySelectorAll(".input-zpl-printer");
+  const values = [];
+  inputs.forEach(input => {
+    const val = input.value.trim();
+    if (val) values.push(val);
+  });
+  return values;
+}
+
 // Load Registry Config
 async function loadRegistryConfig() {
   try {
     const cfg = await tauriInvoke("get_registry_config");
     inputApiUrl.value = cfg.api_url || "";
-    inputPrinterIp.value = cfg.printer_ip || "";
+    renderZplPrinters(cfg.zpl_printers && cfg.zpl_printers.length > 0 ? cfg.zpl_printers : (cfg.printer_ip ? [cfg.printer_ip] : []));
     inputPort.value = cfg.port || "41783";
 
     if (cfg.token && cfg.token.length > 5) {
@@ -232,7 +292,7 @@ async function loadRegistryConfig() {
 // Save Registry Config
 async function saveRegistryConfig() {
   const apiUrl = inputApiUrl.value.trim();
-  const printerIp = inputPrinterIp.value.trim();
+  const zplPrinters = getZplPrintersValues();
   const port = inputPort.value.trim();
 
   if (!apiUrl) {
@@ -243,12 +303,12 @@ async function saveRegistryConfig() {
   try {
     await tauriInvoke("save_registry_config", {
       apiUrl,
-      printerIp,
+      zplPrinters,
       port: port || null
     });
 
     showToast("Registry settings saved successfully!");
-    appendRawAgentLog(`[Config] Saved to HKCU\\Software\\ZebraAgent: ApiUrl="${apiUrl}", PrinterIp="${printerIp}", Port="${port}"`);
+    appendRawAgentLog(`[Config] Saved to HKCU\\Software\\ZebraAgent: ApiUrl="${apiUrl}", zplprinters=[${zplPrinters.join(", ")}], Port="${port}"`);
 
     await loadRegistryConfig();
 
@@ -365,6 +425,9 @@ async function toggleBackgroundService() {
 
 // Event Listeners
 document.getElementById("btnSaveRegistry").addEventListener("click", saveRegistryConfig);
+if (btnAddZplPrinter) {
+  btnAddZplPrinter.addEventListener("click", () => addZplPrinterRow(""));
+}
 document.getElementById("btnClearLog").addEventListener("click", async () => {
   logTerminal.innerHTML = "";
   seenLogs.clear();

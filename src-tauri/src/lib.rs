@@ -45,6 +45,7 @@ fn append_agent_log(line: String) {
 pub struct RegistryConfig {
     pub api_url: String,
     pub printer_ip: String,
+    pub zpl_printers: Vec<String>,
     pub port: String,
     pub token: String,
     pub local_addr: String,
@@ -120,6 +121,11 @@ fn kill_temp_agent() {
     if let Some(mut child) = lock.take() {
         let _ = child.kill();
     }
+    let mut kill_cmd = Command::new("taskkill.exe");
+    kill_cmd.args(["/F", "/IM", "ZebraAgent.exe"]);
+    #[cfg(windows)]
+    kill_cmd.creation_flags(CREATE_NO_WINDOW);
+    let _ = kill_cmd.output();
 }
 
 fn launch_agent_process(target: &PathBuf) -> Result<(), String> {
@@ -211,7 +217,8 @@ async fn get_registry_config() -> Result<RegistryConfig, String> {
             Err(_) => {
                 return Ok(RegistryConfig {
                     api_url: "http://localhost:4209".to_string(),
-                    printer_ip: "192.168.188.47".to_string(),
+                    printer_ip: String::new(),
+                    zpl_printers: Vec::new(),
                     port: "41783".to_string(),
                     ..Default::default()
                 });
@@ -220,6 +227,20 @@ async fn get_registry_config() -> Result<RegistryConfig, String> {
 
         let api_url: String = key.get_value("ApiUrl").unwrap_or_default();
         let printer_ip: String = key.get_value("PrinterIp").unwrap_or_default();
+
+        let mut zpl_printers: Vec<String> = Vec::new();
+        if let Ok(raw) = key.get_value::<String, _>("ZplPrinters") {
+            for item in raw.split(&[',', ';', '\n', '\r'][..]) {
+                let trimmed = item.trim();
+                if !trimmed.is_empty() {
+                    zpl_printers.push(trimmed.to_string());
+                }
+            }
+        }
+        if zpl_printers.is_empty() && !printer_ip.trim().is_empty() {
+            zpl_printers.push(printer_ip.trim().to_string());
+        }
+
         let port: String = key.get_value("Port").unwrap_or_else(|_| {
             if let Ok(dw) = key.get_value::<u32, _>("PortDWord") {
                 dw.to_string()
@@ -234,6 +255,7 @@ async fn get_registry_config() -> Result<RegistryConfig, String> {
         Ok(RegistryConfig {
             api_url,
             printer_ip,
+            zpl_printers,
             port,
             token,
             local_addr,
@@ -245,7 +267,11 @@ async fn get_registry_config() -> Result<RegistryConfig, String> {
 }
 
 #[tauri::command]
-async fn save_registry_config(api_url: String, printer_ip: String, port: Option<String>) -> Result<(), String> {
+async fn save_registry_config(
+    api_url: String,
+    zpl_printers: Vec<String>,
+    port: Option<String>,
+) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
         let (key, _) = hkcu
@@ -253,13 +279,21 @@ async fn save_registry_config(api_url: String, printer_ip: String, port: Option<
             .map_err(|e| format!("Failed to open/create HKCU\\Software\\ZebraAgent: {}", e))?;
 
         let trimmed_api = api_url.trim();
-        let trimmed_printer = printer_ip.trim();
-
         key.set_value("ApiUrl", &trimmed_api)
             .map_err(|e| format!("Failed to set ApiUrl: {}", e))?;
 
-        key.set_value("PrinterIp", &trimmed_printer)
-            .map_err(|e| format!("Failed to set PrinterIp: {}", e))?;
+        let clean_printers: Vec<String> = zpl_printers
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let joined = clean_printers.join(",");
+        key.set_value("ZplPrinters", &joined)
+            .map_err(|e| format!("Failed to set ZplPrinters: {}", e))?;
+
+        let primary_ip = clean_printers.first().cloned().unwrap_or_default();
+        let _ = key.set_value("PrinterIp", &primary_ip);
 
         if let Some(p) = port {
             let trimmed_p = p.trim();
@@ -385,13 +419,12 @@ async fn uninstall_service() -> Result<String, String> {
         sc_cmd.creation_flags(CREATE_NO_WINDOW);
         let _ = sc_cmd.output();
 
-        // 4. Terminate running agent process
+        // 4. Terminate running background process
         kill_temp_agent();
-        let mut kill_cmd = Command::new("taskkill.exe");
-        kill_cmd.args(["/F", "/IM", "ZebraAgent.exe"]);
-        #[cfg(windows)]
-        kill_cmd.creation_flags(CREATE_NO_WINDOW);
-        let _ = kill_cmd.output();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        // 5. Relaunch normally under Tauri as a regular session process
+        let _ = launch_agent_from_temp();
 
         Ok("Uninstalled background service".to_string())
     })
@@ -442,12 +475,6 @@ async fn unpair_agent() -> Result<(), String> {
             let _ = start.output();
         } else {
             kill_temp_agent();
-            let mut kill_cmd = Command::new("taskkill.exe");
-            kill_cmd.args(["/F", "/IM", "ZebraAgent.exe"]);
-            #[cfg(windows)]
-            kill_cmd.creation_flags(CREATE_NO_WINDOW);
-            let _ = kill_cmd.output();
-
             std::thread::sleep(std::time::Duration::from_millis(300));
             if check_is_background_installed() {
                 let _ = launch_persistent_agent();

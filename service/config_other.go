@@ -22,6 +22,10 @@ func savePlatformPrinterIp(printerIp string) error {
 	return nil
 }
 
+func savePlatformZplPrinters(printers []string) error {
+	return nil
+}
+
 func savePlatformPort(port int) error {
 	return nil
 }

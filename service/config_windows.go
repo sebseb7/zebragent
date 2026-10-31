@@ -43,6 +43,24 @@ func readRegistryKey(root registry.Key, path string, c *Config) {
 	checkStr("Name", &c.AgentName)
 	checkStr("ApiUrl", &c.ApiUrl)
 	checkStr("PrinterIp", &c.PrinterIp)
+
+	// Read ZplPrinters (REG_MULTI_SZ or REG_SZ)
+	if multi, _, err := k.GetStringsValue("ZplPrinters"); err == nil && len(multi) > 0 && len(c.ZplPrinters) == 0 {
+		c.ZplPrinters = multi
+		logf("Registry read [%s\\%s]: ZplPrinters=%v", rn, path, multi)
+	} else if val, _, err := k.GetStringValue("ZplPrinters"); err == nil && val != "" && len(c.ZplPrinters) == 0 {
+		parts := strings.FieldsFunc(val, func(r rune) bool {
+			return r == ',' || r == ';' || r == '\n' || r == '\r'
+		})
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				c.ZplPrinters = append(c.ZplPrinters, p)
+			}
+		}
+		logf("Registry read [%s\\%s]: ZplPrinters=%v", rn, path, c.ZplPrinters)
+	}
+
 	checkStr("EventsPath", &c.EventsPath)
 	checkStr("StatePath", &c.StatePath)
 	checkStr("PairPath", &c.PairPath)
@@ -79,6 +97,8 @@ func saveRegistryString(name, value string) error {
 		existing = cur.ApiUrl
 	case "PrinterIp":
 		existing = cur.PrinterIp
+	case "ZplPrinters":
+		existing = strings.Join(cur.ZplPrinters, ",")
 	case "ClientSerial":
 		existing = cur.ClientSerial
 	case "ClientModel":
@@ -129,6 +149,15 @@ func savePlatformApiUrl(apiUrl string) error {
 
 func savePlatformPrinterIp(printerIp string) error {
 	return saveRegistryString("PrinterIp", printerIp)
+}
+
+func savePlatformZplPrinters(printers []string) error {
+	joined := strings.Join(printers, ",")
+	_ = saveRegistryString("ZplPrinters", joined)
+	if len(printers) > 0 {
+		_ = saveRegistryString("PrinterIp", printers[0])
+	}
+	return nil
 }
 
 func savePlatformPort(port int) error {

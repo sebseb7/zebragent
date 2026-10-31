@@ -13,16 +13,17 @@ const (
 
 // Config contains the service configuration.
 type Config struct {
-	Token        string // persistent token obtained from pairing
-	AgentName    string // friendly name assigned to agent
-	ApiUrl       string // base domain only (e.g. https://api.example.com)
-	PrinterIp    string // printer IP address (TCP 9100)
-	EventsPath   string // default "/events" (appended under /api/agent)
-	StatePath    string // default "/state" (appended under /api/agent)
-	PairPath     string // default "/pair" (appended under /api/agent)
-	LocalAddr    string // local monitor address, default "127.0.0.1:41782"
-	ClientSerial string // optional serial override passed via flag
-	ClientModel  string // optional model override passed via flag
+	Token        string   // persistent token obtained from pairing
+	AgentName    string   // friendly name assigned to agent
+	ApiUrl       string   // base domain only (e.g. https://api.example.com)
+	PrinterIp    string   // primary printer IP address (TCP 9100)
+	ZplPrinters  []string // list of ZPL printer IP addresses
+	EventsPath   string   // default "/events" (appended under /api/agent)
+	StatePath    string   // default "/state" (appended under /api/agent)
+	PairPath     string   // default "/pair" (appended under /api/agent)
+	LocalAddr    string   // local monitor address, default "127.0.0.1:41782"
+	ClientSerial string   // optional serial override passed via flag
+	ClientModel  string   // optional model override passed via flag
 }
 
 // CleanApiUrl normalizes the API base domain, stripping any trailing slashes or /api/agent.
@@ -86,6 +87,12 @@ func LoadConfig(isService bool) (*Config, error) {
 	c.PrinterIp = strings.TrimSpace(c.PrinterIp)
 	c.ApiUrl = CleanApiUrl(c.ApiUrl)
 
+	if len(c.ZplPrinters) == 0 && c.PrinterIp != "" {
+		c.ZplPrinters = []string{c.PrinterIp}
+	} else if c.PrinterIp == "" && len(c.ZplPrinters) > 0 {
+		c.PrinterIp = c.ZplPrinters[0]
+	}
+
 	if c.EventsPath == "" {
 		c.EventsPath = "/events"
 	}
@@ -122,6 +129,11 @@ func SaveApiUrl(apiUrl string) error {
 // SavePrinterIp persists the PrinterIp to registry.
 func SavePrinterIp(printerIp string) error {
 	return savePlatformPrinterIp(printerIp)
+}
+
+// SaveZplPrinters persists the list of ZPL printer IPs to registry.
+func SaveZplPrinters(printers []string) error {
+	return savePlatformZplPrinters(printers)
 }
 
 // SavePort persists the active local monitor port to HKCU on launch.
