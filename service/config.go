@@ -41,6 +41,14 @@ func CleanApiUrl(raw string) string {
 	return u
 }
 
+// maskValue masks sensitive values like Token for logging.
+func maskValue(name, val string) string {
+	if strings.EqualFold(name, "token") && len(val) > 8 {
+		return val[:4] + "..." + val[len(val)-4:]
+	}
+	return val
+}
+
 // Endpoint builds the full URL: <ApiUrl domain> + /api/agent/<subpath>.
 func (c *Config) Endpoint(subpath string) string {
 	domain := CleanApiUrl(c.ApiUrl)

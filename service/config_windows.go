@@ -16,13 +16,6 @@ func rootName(root registry.Key) string {
 	return "HKLM"
 }
 
-func maskValue(name, val string) string {
-	if strings.EqualFold(name, "token") && len(val) > 8 {
-		return val[:4] + "..." + val[len(val)-4:]
-	}
-	return val
-}
-
 func readRegistryKey(root registry.Key, path string, c *Config) {
 	k, err := registry.OpenKey(root, path, registry.QUERY_VALUE|registry.WOW64_64KEY)
 	if err != nil {
