@@ -100,9 +100,13 @@ When saving configuration (`Token`, `ApiUrl`, `PrinterIp`):
 
 ## Build & Utilities
 
-- **Build**:
+- **Local Build** (requires local Go installation):
   ```cmd
   build.cmd
+  ```
+- **Docker Build** (Linux / macOS / WSL):
+  ```bash
+  ./build-docker.sh
   ```
 - **Clear Registry** (removes both HKCU and HKLM keys):
   ```cmd
