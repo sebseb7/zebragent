@@ -285,6 +285,70 @@ async fn get_registry_config() -> Result<RegistryConfig, String> {
     .map_err(|e| e.to_string())?
 }
 
+#[cfg(windows)]
+fn signal_agents_reload_event() {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenEventW(dwDesiredAccess: u32, bInheritHandle: i32, lpName: *const u16) -> isize;
+        fn CreateEventW(
+            lpEventAttributes: *const std::ffi::c_void,
+            bManualReset: i32,
+            bInitialState: i32,
+            lpName: *const u16,
+        ) -> isize;
+        fn SetEvent(hEvent: isize) -> i32;
+        fn CloseHandle(hObject: isize) -> i32;
+    }
+
+    const EVENT_MODIFY_STATE: u32 = 0x0002;
+
+    for name in &["Global\\ZebraAgentConfigReload", "Local\\ZebraAgentConfigReload"] {
+        let wide: Vec<u16> = OsStr::new(name).encode_wide().chain(std::iter::once(0)).collect();
+        let mut handle = unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, wide.as_ptr()) };
+        if handle == 0 {
+            handle = unsafe { CreateEventW(std::ptr::null(), 0, 0, wide.as_ptr()) };
+        }
+        if handle != 0 {
+            unsafe {
+                SetEvent(handle);
+                CloseHandle(handle);
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn signal_agents_reload_event() {}
+
+fn signal_agents_http_reload(active_port: u16) {
+    use std::io::Write;
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+
+    let mut ports = vec![active_port, 41782];
+    for p in 41783..=41789 {
+        if !ports.contains(&p) {
+            ports.push(p);
+        }
+    }
+
+    for p in ports {
+        let addr = SocketAddr::from(([127, 0, 0, 1], p));
+        if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(100)) {
+            let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+            let req = format!(
+                "POST /reload HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                p
+            );
+            let _ = stream.write_all(req.as_bytes());
+        }
+    }
+}
+
 #[tauri::command]
 async fn save_registry_config(
     api_url: String,
@@ -314,13 +378,37 @@ async fn save_registry_config(
         let primary_ip = clean_printers.first().cloned().unwrap_or_default();
         let _ = key.set_value("PrinterIp", &primary_ip);
 
+        let mut saved_port = None;
         if let Some(p) = port {
             let trimmed_p = p.trim();
             if !trimmed_p.is_empty() {
                 key.set_value("Port", &trimmed_p)
                     .map_err(|e| format!("Failed to set Port: {}", e))?;
+                saved_port = Some(trimmed_p.to_string());
             }
         }
+
+        // Best effort write to HKLM as well (for machine / SCM background service)
+        let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+        if let Ok((hklm_key, _)) = hklm.create_subkey(r"SOFTWARE\ZebraAgent") {
+            let _ = hklm_key.set_value("ApiUrl", &trimmed_api);
+            let _ = hklm_key.set_value("ZplPrinters", &joined);
+            let _ = hklm_key.set_value("PrinterIp", &primary_ip);
+            if let Some(ref p) = saved_port {
+                let _ = hklm_key.set_value("Port", p);
+            }
+        }
+
+        // Signal running agents via Win32 Named Event
+        signal_agents_reload_event();
+
+        // Signal running agents via local HTTP monitor endpoint
+        let active_port = saved_port
+            .and_then(|p| p.parse::<u16>().ok())
+            .or_else(|| key.get_value::<String, _>("Port").ok().and_then(|p| p.parse::<u16>().ok()))
+            .unwrap_or(41782);
+
+        signal_agents_http_reload(active_port);
 
         Ok(())
     })

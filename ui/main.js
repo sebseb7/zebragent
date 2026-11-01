@@ -309,6 +309,10 @@ async function saveRegistryConfig() {
 
     showToast("Registry settings saved successfully!");
     appendRawAgentLog(`[Config] Saved to HKCU\\Software\\ZebraAgent: ApiUrl="${apiUrl}", zplprinters=[${zplPrinters.join(", ")}], Port="${port}"`);
+    appendRawAgentLog("[Signal] Sent reload signal to running agent(s) (reloading registry & reconnecting printers)...");
+
+    const activePort = port || currentPort || "41783";
+    fetch(`http://127.0.0.1:${activePort}/reload`, { method: "POST" }).catch(() => {});
 
     await loadRegistryConfig();
 

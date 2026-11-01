@@ -115,6 +115,11 @@ type Agent struct {
 
 	pairNotifier   chan struct{}
 	configNotifier chan struct{}
+	printerNotifier chan struct{}
+	isService       bool
+	reloadMu        sync.Mutex
+	lastReload      time.Time
+	printersInfo    map[string]PrinterInfo
 }
 
 func main() {
@@ -191,19 +196,25 @@ func run(ctx context.Context, isService bool) error {
 	}
 
 	a := &Agent{
-		cfg:            cfg,
-		http:           &http.Client{Timeout: 15 * time.Second},
-		jobs:           make(chan Job, 256),
-		pairNotifier:   make(chan struct{}, 1),
-		configNotifier: make(chan struct{}, 1),
-		paired:         cfg.Token != "",
-		agentName:      cfg.AgentName,
-		paperStatus:    "",
-		printerReady:   false,
-		activeJobs:     make(map[int]bool),
-		cancelledJobs:  make(map[int]time.Time),
-		completedJobs:  make(map[int]time.Time),
+		isService:       isService,
+		cfg:             cfg,
+		http:            &http.Client{Timeout: 15 * time.Second},
+		jobs:            make(chan Job, 256),
+		pairNotifier:    make(chan struct{}, 1),
+		configNotifier:  make(chan struct{}, 1),
+		printerNotifier: make(chan struct{}, 1),
+		printersInfo:    make(map[string]PrinterInfo),
+		paired:          cfg.Token != "",
+		agentName:       cfg.AgentName,
+		paperStatus:     "",
+		printerReady:    false,
+		activeJobs:      make(map[int]bool),
+		cancelledJobs:   make(map[int]time.Time),
+		completedJobs:   make(map[int]time.Time),
 	}
+
+	// Start OS-level reload signal and registry watchers
+	startSignalWatcher(ctx, a)
 
 	// Start local HTTP / SSE monitor server for Tauri v2 & CLI
 	a.monitor = NewMonitorServer(cfg.LocalAddr, a)
@@ -415,6 +426,116 @@ func (a *Agent) SetPrinterIp(ip string) error {
 	}
 	logf("Updated PrinterIp: %s", clean)
 	return nil
+}
+
+func (a *Agent) getPrinters() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.cfg.ZplPrinters) > 0 {
+		return append([]string(nil), a.cfg.ZplPrinters...)
+	}
+	if a.cfg.PrinterIp != "" {
+		return []string{a.cfg.PrinterIp}
+	}
+	return nil
+}
+
+func (a *Agent) getPrinterInfo(ip string) (PrinterInfo, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.printersInfo != nil {
+		if info, ok := a.printersInfo[ip]; ok {
+			return info, true
+		}
+	}
+	return a.lastPrinterInfo, false
+}
+
+// ReloadFromRegistry re-reads configuration from the Windows registry,
+// updates agent state, reconnects backend SSE if ApiUrl changed, and reconnects to printers.
+func (a *Agent) ReloadFromRegistry() error {
+	a.reloadMu.Lock()
+	defer a.reloadMu.Unlock()
+
+	// Debounce: ignore reload calls within 150ms of each other
+	if time.Since(a.lastReload) < 150*time.Millisecond {
+		return nil
+	}
+	a.lastReload = time.Now()
+
+	logf("Reload signal received; reloading configuration from registry...")
+	newCfg, err := LoadConfig(a.isService)
+	if err != nil {
+		logf("ReloadFromRegistry error: %v", err)
+		return err
+	}
+
+	a.mu.Lock()
+	oldApiUrl := a.cfg.ApiUrl
+
+	a.cfg.ApiUrl = newCfg.ApiUrl
+	a.cfg.PrinterIp = newCfg.PrinterIp
+	a.cfg.ZplPrinters = newCfg.ZplPrinters
+	if newCfg.Token != "" {
+		a.cfg.Token = newCfg.Token
+		a.paired = true
+	}
+	if newCfg.AgentName != "" {
+		a.cfg.AgentName = newCfg.AgentName
+		a.agentName = newCfg.AgentName
+	}
+	a.mu.Unlock()
+
+	logf("Reloaded configuration from registry: ApiUrl=%q, PrinterIp=%q, ZplPrinters=%v",
+		newCfg.ApiUrl, newCfg.PrinterIp, newCfg.ZplPrinters)
+
+	// If ApiUrl changed, wake event stream watcher to reconnect to new backend URL
+	if oldApiUrl != newCfg.ApiUrl {
+		logf("ApiUrl changed (%q -> %q); reconnecting backend stream...", oldApiUrl, newCfg.ApiUrl)
+		select {
+		case a.configNotifier <- struct{}{}:
+		default:
+		}
+	}
+
+	// Always reconnect to printers on reload
+	logf("Reconnecting to printers: %v...", newCfg.ZplPrinters)
+	a.reconnectPrinters()
+
+	if a.monitor != nil {
+		a.monitor.Broadcast("config", map[string]any{
+			"apiUrl":      newCfg.ApiUrl,
+			"printerIp":   newCfg.PrinterIp,
+			"zplPrinters": newCfg.ZplPrinters,
+		})
+	}
+	return nil
+}
+
+// reconnectPrinters drops existing BLE connections if any, resets printer status,
+// and signals printerPoller to immediately re-poll and report state.
+func (a *Agent) reconnectPrinters() {
+	disconnectBLE()
+
+	a.mu.Lock()
+	a.lastPrinterInfo = PrinterInfo{
+		IP:     a.cfg.PrinterIp,
+		Type:   "zpl",
+		Status: "connecting",
+	}
+	a.printerReady = false
+	a.lastFault = ""
+	a.mu.Unlock()
+
+	if a.monitor != nil {
+		a.monitor.Broadcast("printer", a.lastPrinterInfo)
+	}
+
+	// Trigger immediate printer poll in printerPoller
+	select {
+	case a.printerNotifier <- struct{}{}:
+	default:
+	}
 }
 
 // Pair submits the PIN to /api/agent/pair, persists the token, and wakes the agent.
@@ -1190,6 +1311,10 @@ func (a *Agent) printerPoller(ctx context.Context) {
 			return
 		case <-ticker.C:
 			a.checkAndReportPrinter(ctx, &lastInfo, &hasPolledOnce)
+		case <-a.printerNotifier:
+			logf("Printer reconnect triggered; immediately polling printers...")
+			hasPolledOnce = false
+			a.checkAndReportPrinter(ctx, &lastInfo, &hasPolledOnce)
 		}
 	}
 }
@@ -1217,13 +1342,14 @@ func (a *Agent) getToken() string {
 }
 
 func (a *Agent) checkAndReportPrinter(ctx context.Context, last *PrinterInfo, hasPolledOnce *bool) {
-	ip := a.getPrinterIp()
-	if ip == "" {
+	printers := a.getPrinters()
+	if len(printers) == 0 {
 		return
 	}
 
+	primaryIP := printers[0]
 	// Skip background poll tick if the printer socket is currently busy printing or cancelling
-	info, ok := TryQueryPrinterInfo(ip)
+	info, ok := TryQueryPrinterInfo(primaryIP)
 	if !ok {
 		return
 	}
@@ -1231,6 +1357,17 @@ func (a *Agent) checkAndReportPrinter(ctx context.Context, last *PrinterInfo, ha
 	a.mu.Lock()
 	a.lastPrinterInfo = info
 	a.printerReady = info.Ready
+	if a.printersInfo == nil {
+		a.printersInfo = make(map[string]PrinterInfo)
+	}
+	a.printersInfo[primaryIP] = info
+
+	for _, secIP := range printers[1:] {
+		if secInfo, secOk := TryQueryPrinterInfo(secIP); secOk {
+			a.printersInfo[secIP] = secInfo
+		}
+	}
+
 	if info.Errors.HeadOpen {
 		a.lastFault = "head open"
 	} else if info.Errors.Pause {
@@ -1270,10 +1407,9 @@ func (a *Agent) checkAndReportPrinter(ctx context.Context, last *PrinterInfo, ha
 			info.Errors.HeadOpen, info.Errors.Pause, info.Errors.Other, info.Errors.Unreachable,
 		)
 
-		// On initial poll, state is reported via sendPrinterStateUpstream strictly after SSE connects.
-		// Only report from background poller when an actual status change occurs.
-		if !isInitialPoll && a.isPaired() && a.isBackendConnected() {
-			go a.postStatePayload(ctx, "", "", "", false)
+		// Report printer state upstream whenever status changes or reconnect occurred
+		if a.isPaired() && a.isBackendConnected() {
+			go a.postStatePayload(ctx, "", "", "", isInitialPoll)
 		}
 	}
 }
@@ -1373,8 +1509,27 @@ func (a *Agent) postStatePayload(ctx context.Context, jobID, jobState, detail st
 		"errors":      info.Errors,
 	}
 
+	printers := a.getPrinters()
+	var printersList []any
+	for _, p := range printers {
+		pInfo, ok := a.getPrinterInfo(p)
+		if !ok || pInfo.IP == "" {
+			pInfo = info
+		}
+		printersList = append(printersList, map[string]any{
+			"serial":      pInfo.Serial,
+			"model":       pInfo.Model,
+			"type":        "zpl",
+			"labelLength": pInfo.LabelLength,
+			"errors":      pInfo.Errors,
+		})
+	}
+	if len(printersList) == 0 {
+		printersList = []any{printerObj}
+	}
+
 	stateMap := map[string]any{
-		"printers": []any{printerObj},
+		"printers": printersList,
 	}
 	if fault != "" {
 		stateMap["fault"] = fault

@@ -59,6 +59,7 @@ func (m *MonitorServer) Start(ctx context.Context) error {
 	mux.HandleFunc("/pair", m.handlePair)
 	mux.HandleFunc("/unpair", m.handleUnpair)
 	mux.HandleFunc("/config", m.handleConfig)
+	mux.HandleFunc("/reload", m.handleReload)
 	mux.HandleFunc("/state", m.handleState)
 	mux.HandleFunc("/print", m.handlePrint)
 
@@ -226,6 +227,27 @@ func (m *MonitorServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 		"success":   true,
 		"apiUrl":    snap.ApiUrl,
 		"printerIp": snap.PrinterIP,
+	})
+}
+
+// handleReload triggers reloading configuration from registry and reconnecting to printers.
+func (m *MonitorServer) handleReload(w http.ResponseWriter, r *http.Request) {
+	logf("Received HTTP /reload signal")
+	if m.agent != nil {
+		if err := m.agent.ReloadFromRegistry(); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+			return
+		}
+	}
+	snap := m.agent.GetSnapshot()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"success":     true,
+		"apiUrl":      snap.ApiUrl,
+		"printerIp":   snap.PrinterIP,
+		"zplPrinters": m.agent.getPrinters(),
 	})
 }
 

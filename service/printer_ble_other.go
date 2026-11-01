@@ -52,3 +52,6 @@ func queryStatusBLELocked(target string) (HostStatus, error) {
 	return HostStatus{}, errors.New("direct BLE GATT is not supported on this platform")
 }
 
+func disconnectBLE() {}
+
+

@@ -262,7 +262,18 @@ type bleManager struct {
 	notifyCh chan struct{}
 }
 
+func disconnectBLE() {
+	bleMgr.mu.Lock()
+	defer bleMgr.mu.Unlock()
+	if bleMgr.connected {
+		_ = bleMgr.device.Disconnect()
+		bleMgr.connected = false
+		bleMgr.target = ""
+	}
+}
+
 func (m *bleManager) ensureConnected(target string) error {
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
