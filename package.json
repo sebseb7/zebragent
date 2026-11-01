@@ -1,6 +1,6 @@
 {
   "name": "zebra-agent-ui",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Zebra Agent Manager Tauri v2 Application",
   "scripts": {
     "tauri": "set \"PATH=%USERPROFILE%\\.cargo\\bin;%PATH%\" && npx @tauri-apps/cli",
