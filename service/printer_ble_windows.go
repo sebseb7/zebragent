@@ -69,7 +69,7 @@ func IsValidPrinterTarget(target string) bool {
 	if net.ParseIP(target) != nil {
 		return true
 	}
-	return IsBluetoothTarget(target)
+	return IsBluetoothTarget(target) || IsUSBTarget(target)
 }
 
 func isMACAddress(s string) bool {

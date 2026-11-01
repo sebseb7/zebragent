@@ -30,7 +30,7 @@ func IsValidPrinterTarget(target string) bool {
 	if net.ParseIP(target) != nil {
 		return true
 	}
-	return IsBluetoothTarget(target)
+	return IsBluetoothTarget(target) || IsUSBTarget(target)
 }
 
 func queryBLEPrinterInfoLocked(target string) PrinterInfo {

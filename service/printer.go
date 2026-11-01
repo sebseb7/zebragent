@@ -72,7 +72,7 @@ func queryPrinterInfoLocked(ip string) PrinterInfo {
 		return queryBLEPrinterInfoLocked(ip)
 	}
 
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip, printerPort), 3*time.Second)
+	conn, err := dialPrinter(ip, 3*time.Second)
 	if err != nil {
 		return info
 	}
@@ -354,6 +354,14 @@ func (s HostStatus) Fault() string {
 	return ""
 }
 
+// dialPrinter opens a connection to a printer: USB (usb:...) or TCP port 9100.
+func dialPrinter(target string, timeout time.Duration) (net.Conn, error) {
+	if IsUSBTarget(target) {
+		return dialUSB(target)
+	}
+	return net.DialTimeout("tcp", net.JoinHostPort(target, printerPort), timeout)
+}
+
 func sendZPL(ip, zpl string) error {
 	printerMu.Lock()
 	defer printerMu.Unlock()
@@ -362,7 +370,7 @@ func sendZPL(ip, zpl string) error {
 		return sendZPLBLELocked(ip, zpl)
 	}
 
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip, printerPort), 5*time.Second)
+	conn, err := dialPrinter(ip, 5*time.Second)
 	if err != nil {
 		return err
 	}
@@ -382,7 +390,7 @@ func QueryStatus(ip string) (HostStatus, error) {
 	}
 
 	var s HostStatus
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip, printerPort), 5*time.Second)
+	conn, err := dialPrinter(ip, 5*time.Second)
 	if err != nil {
 		return s, err
 	}
@@ -424,9 +432,10 @@ func atoi(s string) int {
 // ScanLocalZPLPrinters scans all active local IPv4 /24 subnets on TCP port 9100
 // and queries any responsive hosts with ~HI, ~HQES, and SGD device.unique_id to identify ZPL printers.
 func ScanLocalZPLPrinters() []PrinterInfo {
+	usbFound := scanUSBZPLPrinters()
 	prefixes := localIPv4Prefixes()
 	if len(prefixes) == 0 {
-		return nil
+		return usbFound
 	}
 
 	var candidateIPs []string
@@ -469,7 +478,7 @@ func ScanLocalZPLPrinters() []PrinterInfo {
 	sort.Slice(found, func(i, j int) bool {
 		return found[i].IP < found[j].IP
 	})
-	return found
+	return append(usbFound, found...)
 }
 
 func localIPv4Prefixes() []string {
