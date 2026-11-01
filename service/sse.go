@@ -46,6 +46,18 @@ func StreamEvents(ctx context.Context, cfg *Config, onConnChange func(bool), onU
 	backoff := time.Second
 	everConnected := false
 
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 15 * time.Second,
+	}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport}
+
 	for ctx.Err() == nil {
 		reqUrl := cfg.Endpoint(cfg.EventsPath)
 		if everConnected {
@@ -56,7 +68,7 @@ func StreamEvents(ctx context.Context, cfg *Config, onConnChange func(bool), onU
 
 		start := time.Now()
 		connectedOnce := false
-		err := readStream(ctx, cfg, &lastID, func(c bool) {
+		err := readStream(ctx, client, cfg, &lastID, func(c bool) {
 			if c {
 				connectedOnce = true
 				everConnected = true
@@ -107,7 +119,7 @@ func StreamEvents(ctx context.Context, cfg *Config, onConnChange func(bool), onU
 	}
 }
 
-func readStream(ctx context.Context, cfg *Config, lastID *string, onConnected func(bool), handle func(Event)) error {
+func readStream(ctx context.Context, client *http.Client, cfg *Config, lastID *string, onConnected func(bool), handle func(Event)) error {
 	reqUrl := cfg.Endpoint(cfg.EventsPath)
 	parsedUrl, err := url.Parse(reqUrl)
 	if err != nil {
@@ -132,17 +144,6 @@ func readStream(ctx context.Context, cfg *Config, lastID *string, onConnected fu
 	if *lastID != "" {
 		req.Header.Set("Last-Event-ID", *lastID)
 	}
-
-	transport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout:   10 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 15 * time.Second,
-	}
-	client := &http.Client{Transport: transport}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -171,7 +172,7 @@ func readStream(ctx context.Context, cfg *Config, lastID *string, onConnected fu
 		heartbeatTimedOut.Store(true)
 		logf("SSE heartbeat timeout: no heartbeat received for %v; issuing reconnect...", HeartbeatTimeout)
 		cancelStream()
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	})
 	defer timer.Stop()
 

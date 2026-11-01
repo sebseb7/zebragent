@@ -204,10 +204,20 @@ func (m *MonitorServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if apiUrl != "" {
-		_ = m.agent.SetApiUrl(apiUrl)
+		if err := m.agent.SetApiUrl(apiUrl); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+			return
+		}
 	}
 	if printerIp != "" {
-		_ = m.agent.SetPrinterIp(printerIp)
+		if err := m.agent.SetPrinterIp(printerIp); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+			return
+		}
 	}
 
 	snap := m.agent.GetSnapshot()

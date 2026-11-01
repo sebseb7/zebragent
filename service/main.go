@@ -94,6 +94,7 @@ type Agent struct {
 	monitor *MonitorServer
 
 	mu               sync.Mutex
+	stateMu          sync.Mutex
 	jobs             chan Job
 	seq              int
 	paired           bool
@@ -110,7 +111,7 @@ type Agent struct {
 
 	activeJobsMu  sync.Mutex
 	activeJobs    map[int]bool
-	cancelledJobs map[int]bool
+	cancelledJobs map[int]time.Time
 	completedJobs map[int]time.Time
 
 	pairNotifier   chan struct{}
@@ -185,7 +186,7 @@ func run(ctx context.Context, isService bool) error {
 	// Handle explicit -unpair request
 	if !isService && flagUnpair {
 		_ = SaveToken("")
-	_ = SaveName("")
+		_ = SaveName("")
 		cfg.Token = ""
 		logf("Token cleared via -unpair flag.")
 	}
@@ -201,7 +202,7 @@ func run(ctx context.Context, isService bool) error {
 		paperStatus:    "",
 		printerReady:   false,
 		activeJobs:     make(map[int]bool),
-		cancelledJobs:  make(map[int]bool),
+		cancelledJobs:  make(map[int]time.Time),
 		completedJobs:  make(map[int]time.Time),
 	}
 
@@ -230,7 +231,7 @@ func run(ctx context.Context, isService bool) error {
 	for ctx.Err() == nil {
 		// 1. Wait for ApiUrl if not set
 		for a.getApiUrl() == "" {
-			logf("ZebraAgent started. ApiUrl not set. Waiting for ApiUrl via local monitor (http://%s) POST /config or /pair...", cfg.LocalAddr)
+			logf("ZebraAgent started. ApiUrl not set. Waiting for ApiUrl via local monitor (http://%s) POST /config or /pair...", a.getLocalAddr())
 			select {
 			case <-ctx.Done():
 				return nil
@@ -241,7 +242,7 @@ func run(ctx context.Context, isService bool) error {
 
 		// 2. Wait for pairing PIN if not paired
 		if !a.isPaired() {
-			logf("ZebraAgent waiting for pairing PIN via local monitor (http://%s) or CLI...", cfg.LocalAddr)
+			logf("ZebraAgent waiting for pairing PIN via local monitor (http://%s) or CLI...", a.getLocalAddr())
 			select {
 			case <-ctx.Done():
 				return nil
@@ -252,11 +253,36 @@ func run(ctx context.Context, isService bool) error {
 			}
 		}
 
-		// 3. Paired and ApiUrl set: start worker and stream events
+		// Drain any stale notification signals before starting the active stream
+		select {
+		case <-a.configNotifier:
+		default:
+		}
+		select {
+		case <-a.pairNotifier:
+		default:
+		}
+
+		// 3. Paired and ApiUrl set: take a thread-safe snapshot of Config, start worker, and stream events
+		cfgSnapshot := a.getConfigSnapshot()
 		workerCtx, cancelWorker := context.WithCancel(ctx)
+
+		// Watch for runtime config/pair/unpair changes and restart the stream immediately
+		go func() {
+			select {
+			case <-workerCtx.Done():
+			case <-a.configNotifier:
+				logf("Configuration updated; restarting event stream...")
+				cancelWorker()
+			case <-a.pairNotifier:
+				logf("Pairing state updated; restarting event stream...")
+				cancelWorker()
+			}
+		}()
+
 		go a.worker(workerCtx)
 
-		StreamEvents(workerCtx, a.cfg,
+		StreamEvents(workerCtx, &cfgSnapshot,
 			func(connected bool) {
 				a.mu.Lock()
 				a.backendConnected = connected
@@ -266,7 +292,9 @@ func run(ctx context.Context, isService bool) error {
 			func() {
 				a.Unpair()
 			},
-			a.handle,
+			func(ev Event) {
+				a.handle(workerCtx, ev)
+			},
 		)
 
 		cancelWorker()
@@ -276,11 +304,27 @@ func run(ctx context.Context, isService bool) error {
 		if ctx.Err() != nil {
 			break
 		}
-		time.Sleep(2 * time.Second)
+		select {
+		case <-ctx.Done():
+			break
+		case <-time.After(2 * time.Second):
+		}
 	}
 
 	logf("shutting down")
 	return nil
+}
+
+func (a *Agent) getConfigSnapshot() Config {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return *a.cfg
+}
+
+func (a *Agent) getLocalAddr() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.cfg.LocalAddr
 }
 
 func (a *Agent) isPaired() bool {
@@ -289,7 +333,7 @@ func (a *Agent) isPaired() bool {
 	return a.paired && a.cfg.Token != ""
 }
 
-// Unpair clears stored token and returns to unpaired state.
+// Unpair clears stored token, wakes any active stream, and returns to unpaired state.
 func (a *Agent) Unpair() {
 	a.mu.Lock()
 	a.paired = false
@@ -301,6 +345,12 @@ func (a *Agent) Unpair() {
 
 	_ = SaveToken("")
 	_ = SaveName("")
+
+	// Wake stream watcher if currently connected
+	select {
+	case a.configNotifier <- struct{}{}:
+	default:
+	}
 
 	if a.monitor != nil {
 		a.monitor.Broadcast("unpaired", map[string]any{"reason": "unauthorized"})
@@ -322,14 +372,17 @@ func (a *Agent) SetApiUrl(rawUrl string) error {
 	}
 
 	a.mu.Lock()
+	changed := a.cfg.ApiUrl != clean
 	a.cfg.ApiUrl = clean
 	a.mu.Unlock()
 
 	_ = SaveApiUrl(clean)
 
-	select {
-	case a.configNotifier <- struct{}{}:
-	default:
+	if changed {
+		select {
+		case a.configNotifier <- struct{}{}:
+		default:
+		}
 	}
 
 	if a.monitor != nil {
@@ -367,15 +420,16 @@ func (a *Agent) SetPrinterIp(ip string) error {
 
 // Pair submits the PIN to /api/agent/pair, persists the token, and wakes the agent.
 func (a *Agent) Pair(ctx context.Context, pin string) (*PairResponse, error) {
-	if a.getApiUrl() == "" {
+	cfgSnap := a.getConfigSnapshot()
+	if cfgSnap.ApiUrl == "" {
 		return nil, errors.New("cannot pair: ApiUrl is not configured")
 	}
 
-	reqUrl := a.cfg.Endpoint(a.cfg.PairPath)
+	reqUrl := cfgSnap.Endpoint(cfgSnap.PairPath)
 	reqBody := map[string]string{
 		"pairingpin":   pin,
-		"clientserial": a.cfg.ClientSerial,
-		"clientmodel":  a.cfg.ClientModel,
+		"clientserial": cfgSnap.ClientSerial,
+		"clientmodel":  cfgSnap.ClientModel,
 		"clienttype":   "zpl",
 		"agentversion": AgentVersion,
 	}
@@ -425,7 +479,7 @@ func (a *Agent) Pair(ctx context.Context, pin string) (*PairResponse, error) {
 	a.agentName = pairResp.Name
 	a.mu.Unlock()
 
-	// Notify waiting run loop
+	// Notify waiting run loop or active stream watcher
 	select {
 	case a.pairNotifier <- struct{}{}:
 	default:
@@ -484,7 +538,7 @@ func (a *Agent) EnqueueJob(j Job) {
 }
 
 // handle parses incoming SSE events from the backend.
-func (a *Agent) handle(ev Event) {
+func (a *Agent) handle(ctx context.Context, ev Event) {
 	if ev.Event == "connected" {
 		logf("Backend SSE event: connected, %s", ev.Data)
 
@@ -509,8 +563,8 @@ func (a *Agent) handle(ev Event) {
 			}
 		}
 
-		go a.sendPrinterStateUpstream()
-		go a.drainBacklog()
+		go a.sendPrinterStateUpstream(ctx)
+		go a.drainBacklog(ctx)
 		return
 	}
 
@@ -532,7 +586,7 @@ func (a *Agent) handle(ev Event) {
 		}
 		if strings.EqualFold(jobEv.Action, "created") {
 			logf("Backend SSE event: job created (jobId=%d agentprinterId=%d type=%q)", jobID, jobEv.AgentPrinterID, jobEv.Type)
-			a.handleJobCreated(jobID, jobEv.AgentPrinterID, "")
+			a.handleJobCreated(ctx, jobID, jobEv.AgentPrinterID, "")
 			return
 		}
 	}
@@ -734,7 +788,7 @@ func (a *Agent) worker(ctx context.Context) {
 
 // runJob sends the ZPL then polls the printer (~HS) until idle, reporting state changes.
 func (a *Agent) runJob(ctx context.Context, j Job) {
-	ip := a.cfg.PrinterIp
+	ip := a.getPrinterIp()
 	if ip == "" {
 		a.reportState(j.ID, "error", "no printer IP configured")
 		return
@@ -809,10 +863,7 @@ func (a *Agent) runBackendJob(ctx context.Context, j Job) {
 	jobID := j.BackendJobID
 
 	// 1. Check if cancelled before execution
-	a.activeJobsMu.Lock()
-	cancelled := a.cancelledJobs[jobID]
-	a.activeJobsMu.Unlock()
-	if cancelled {
+	if a.isJobCancelled(jobID) {
 		logf("Job %d was cancelled before execution, discarding.", jobID)
 		a.finishJob(jobID)
 		return
@@ -821,10 +872,10 @@ func (a *Agent) runBackendJob(ctx context.Context, j Job) {
 	// 2. Fetch payload if not provided
 	zpl := j.ZPL
 	if zpl == "" {
-		fetched, err := a.fetchJobPayload(jobID)
+		fetched, err := a.fetchJobPayload(ctx, jobID)
 		if err != nil {
 			logf("Failed to fetch payload for job %d: %v", jobID, err)
-			a.patchJobFailed(jobID)
+			a.patchJobFailed(ctx, jobID)
 			a.reportState(j.ID, "error", "fetch failed: "+err.Error())
 			a.finishJob(jobID)
 			return
@@ -833,24 +884,21 @@ func (a *Agent) runBackendJob(ctx context.Context, j Job) {
 	}
 
 	// 3. Check again if cancelled during fetch
-	a.activeJobsMu.Lock()
-	cancelled = a.cancelledJobs[jobID]
-	a.activeJobsMu.Unlock()
-	if cancelled {
+	if a.isJobCancelled(jobID) {
 		logf("Job %d was cancelled during fetch, discarding.", jobID)
 		a.finishJob(jobID)
 		return
 	}
 
 	// 4. Mark processing
-	a.markJobProcessing(jobID)
+	a.markJobProcessing(ctx, jobID)
 	a.reportState(j.ID, "processing", "")
 
 	// 5. Write raw ZPL directly to target printer
 	ip := a.getPrinterIp()
 	if ip == "" {
 		logf("Failed to execute job %d: no printer IP configured", jobID)
-		a.patchJobFailed(jobID)
+		a.patchJobFailed(ctx, jobID)
 		a.reportState(j.ID, "error", "no printer IP configured")
 		a.finishJob(jobID)
 		return
@@ -859,22 +907,32 @@ func (a *Agent) runBackendJob(ctx context.Context, j Job) {
 	logf("Writing print job %d (%d bytes) to printer %s...", jobID, len(zpl), ip)
 	if err := sendZPL(ip, zpl); err != nil {
 		logf("Failed to execute job %d: %v", jobID, err)
-		a.patchJobFailed(jobID)
+		a.patchJobFailed(ctx, jobID)
 		a.reportState(j.ID, "error", "send failed: "+err.Error())
 		a.finishJob(jobID)
 		return
 	}
 
 	// 6. Mark completed
-	a.markJobCompleted(jobID)
+	a.markJobCompleted(ctx, jobID)
 	a.reportState(j.ID, "completed", "")
 	logf("Job %d successfully completed.", jobID)
 	a.finishJob(jobID)
 
-	time.Sleep(300 * time.Millisecond)
+	select {
+	case <-ctx.Done():
+	case <-time.After(300 * time.Millisecond):
+	}
 }
 
-func (a *Agent) handleJobCreated(jobID, agentPrinterID int, data string) {
+func (a *Agent) isJobCancelled(jobID int) bool {
+	a.activeJobsMu.Lock()
+	_, cancelled := a.cancelledJobs[jobID]
+	a.activeJobsMu.Unlock()
+	return cancelled
+}
+
+func (a *Agent) handleJobCreated(ctx context.Context, jobID, agentPrinterID int, data string) {
 	if jobID <= 0 {
 		return
 	}
@@ -884,7 +942,7 @@ func (a *Agent) handleJobCreated(jobID, agentPrinterID int, data string) {
 		a.activeJobsMu.Unlock()
 		return
 	}
-	if a.cancelledJobs[jobID] {
+	if _, cancelled := a.cancelledJobs[jobID]; cancelled {
 		a.activeJobsMu.Unlock()
 		logf("Job %d was cancelled, skipping creation.", jobID)
 		return
@@ -907,15 +965,21 @@ func (a *Agent) handleJobCreated(jobID, agentPrinterID int, data string) {
 	case a.jobs <- j:
 	default:
 		logf("Agent job queue full, cannot enqueue job %d", jobID)
-		a.patchJobFailed(jobID)
+		a.patchJobFailed(ctx, jobID)
 		a.finishJob(jobID)
 	}
 }
 
 func (a *Agent) cancelJob(jobID int) {
+	now := time.Now()
 	a.activeJobsMu.Lock()
-	a.cancelledJobs[jobID] = true
+	a.cancelledJobs[jobID] = now
 	delete(a.activeJobs, jobID)
+	for id, t := range a.cancelledJobs {
+		if now.Sub(t) > 10*time.Minute {
+			delete(a.cancelledJobs, id)
+		}
+	}
 	a.activeJobsMu.Unlock()
 
 	logf("Job %d cancelled by user.", jobID)
@@ -928,30 +992,35 @@ func (a *Agent) cancelJob(jobID int) {
 }
 
 func (a *Agent) finishJob(jobID int) {
+	now := time.Now()
 	a.activeJobsMu.Lock()
 	delete(a.activeJobs, jobID)
-	a.completedJobs[jobID] = time.Now()
-	now := time.Now()
+	a.completedJobs[jobID] = now
 	for id, t := range a.completedJobs {
 		if now.Sub(t) > 10*time.Minute {
 			delete(a.completedJobs, id)
 		}
 	}
+	for id, t := range a.cancelledJobs {
+		if now.Sub(t) > 10*time.Minute {
+			delete(a.cancelledJobs, id)
+		}
+	}
 	a.activeJobsMu.Unlock()
 }
 
-func (a *Agent) fetchJobPayload(jobID int) (string, error) {
-	token := a.getToken()
-	if token == "" {
+func (a *Agent) fetchJobPayload(ctx context.Context, jobID int) (string, error) {
+	cfgSnap := a.getConfigSnapshot()
+	if cfgSnap.Token == "" {
 		return "", errors.New("no auth token")
 	}
 
-	reqUrl := a.cfg.Endpoint(fmt.Sprintf("jobs/%d", jobID))
-	req, err := http.NewRequestWithContext(context.Background(), "GET", reqUrl, nil)
+	reqUrl := cfgSnap.Endpoint(fmt.Sprintf("jobs/%d", jobID))
+	req, err := http.NewRequestWithContext(ctx, "GET", reqUrl, nil)
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", "Bearer "+cfgSnap.Token)
 	req.Header.Set("agentversion", AgentVersion)
 
 	resp, err := a.http.Do(req)
@@ -976,17 +1045,17 @@ func (a *Agent) fetchJobPayload(jobID int) (string, error) {
 	return res.Job.Data, nil
 }
 
-func (a *Agent) markJobProcessing(jobID int) {
-	token := a.getToken()
-	if token == "" {
+func (a *Agent) markJobProcessing(ctx context.Context, jobID int) {
+	cfgSnap := a.getConfigSnapshot()
+	if cfgSnap.Token == "" {
 		return
 	}
-	reqUrl := a.cfg.Endpoint(fmt.Sprintf("jobs/%d/processing", jobID))
-	req, err := http.NewRequestWithContext(context.Background(), "POST", reqUrl, nil)
+	reqUrl := cfgSnap.Endpoint(fmt.Sprintf("jobs/%d/processing", jobID))
+	req, err := http.NewRequestWithContext(ctx, "POST", reqUrl, nil)
 	if err != nil {
 		return
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", "Bearer "+cfgSnap.Token)
 	req.Header.Set("agentversion", AgentVersion)
 
 	resp, err := a.http.Do(req)
@@ -1001,17 +1070,17 @@ func (a *Agent) markJobProcessing(jobID int) {
 	}
 }
 
-func (a *Agent) markJobCompleted(jobID int) {
-	token := a.getToken()
-	if token == "" {
+func (a *Agent) markJobCompleted(ctx context.Context, jobID int) {
+	cfgSnap := a.getConfigSnapshot()
+	if cfgSnap.Token == "" {
 		return
 	}
-	reqUrl := a.cfg.Endpoint(fmt.Sprintf("jobs/%d/completed", jobID))
-	req, err := http.NewRequestWithContext(context.Background(), "POST", reqUrl, nil)
+	reqUrl := cfgSnap.Endpoint(fmt.Sprintf("jobs/%d/completed", jobID))
+	req, err := http.NewRequestWithContext(ctx, "POST", reqUrl, nil)
 	if err != nil {
 		return
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", "Bearer "+cfgSnap.Token)
 	req.Header.Set("agentversion", AgentVersion)
 
 	resp, err := a.http.Do(req)
@@ -1026,18 +1095,18 @@ func (a *Agent) markJobCompleted(jobID int) {
 	}
 }
 
-func (a *Agent) patchJobFailed(jobID int) {
-	token := a.getToken()
-	if token == "" {
+func (a *Agent) patchJobFailed(ctx context.Context, jobID int) {
+	cfgSnap := a.getConfigSnapshot()
+	if cfgSnap.Token == "" {
 		return
 	}
-	reqUrl := a.cfg.Endpoint(fmt.Sprintf("jobs/%d", jobID))
+	reqUrl := cfgSnap.Endpoint(fmt.Sprintf("jobs/%d", jobID))
 	bodyBytes, _ := json.Marshal(map[string]string{"state": "failed"})
-	req, err := http.NewRequestWithContext(context.Background(), "PATCH", reqUrl, bytes.NewReader(bodyBytes))
+	req, err := http.NewRequestWithContext(ctx, "PATCH", reqUrl, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", "Bearer "+cfgSnap.Token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("agentversion", AgentVersion)
 
@@ -1053,19 +1122,19 @@ func (a *Agent) patchJobFailed(jobID int) {
 	}
 }
 
-func (a *Agent) drainBacklog() {
-	token := a.getToken()
-	if token == "" {
+func (a *Agent) drainBacklog(ctx context.Context) {
+	cfgSnap := a.getConfigSnapshot()
+	if cfgSnap.Token == "" {
 		return
 	}
 
-	reqUrl := a.cfg.Endpoint("jobs?state=pending")
-	req, err := http.NewRequestWithContext(context.Background(), "GET", reqUrl, nil)
+	reqUrl := cfgSnap.Endpoint("jobs?state=pending")
+	req, err := http.NewRequestWithContext(ctx, "GET", reqUrl, nil)
 	if err != nil {
 		logf("drainBacklog request error: %v", err)
 		return
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", "Bearer "+cfgSnap.Token)
 	req.Header.Set("agentversion", AgentVersion)
 
 	resp, err := a.http.Do(req)
@@ -1098,7 +1167,7 @@ func (a *Agent) drainBacklog() {
 	if len(res.Jobs) > 0 {
 		logf("Processing %d pending jobs from backlog...", len(res.Jobs))
 		for _, j := range res.Jobs {
-			a.handleJobCreated(j.ID, j.AgentPrinterID, j.Data)
+			a.handleJobCreated(ctx, j.ID, j.AgentPrinterID, j.Data)
 		}
 	}
 }
@@ -1155,7 +1224,11 @@ func (a *Agent) checkAndReportPrinter(ctx context.Context, last *PrinterInfo, ha
 		return
 	}
 
-	info := QueryPrinterInfo(ip)
+	// Skip background poll tick if the printer socket is currently busy printing or cancelling
+	info, ok := TryQueryPrinterInfo(ip)
+	if !ok {
+		return
+	}
 
 	a.mu.Lock()
 	a.lastPrinterInfo = info
@@ -1202,13 +1275,13 @@ func (a *Agent) checkAndReportPrinter(ctx context.Context, last *PrinterInfo, ha
 		// On initial poll, state is reported via sendPrinterStateUpstream strictly after SSE connects.
 		// Only report from background poller when an actual status change occurs.
 		if !isInitialPoll && a.isPaired() && a.isBackendConnected() {
-			go a.postStatePayload(context.Background(), "", "", "", false)
+			go a.postStatePayload(ctx, "", "", "", false)
 		}
 	}
 }
 
 // sendPrinterStateUpstream sends the latest printer state to /api/agent/state after SSE connection.
-func (a *Agent) sendPrinterStateUpstream() {
+func (a *Agent) sendPrinterStateUpstream(ctx context.Context) {
 	ip := a.getPrinterIp()
 	if ip == "" {
 		return
@@ -1228,7 +1301,7 @@ func (a *Agent) sendPrinterStateUpstream() {
 	}
 
 	logf("Sending printer state upstream after SSE connection...")
-	a.postStatePayload(context.Background(), "", "", "", true)
+	a.postStatePayload(ctx, "", "", "", true)
 }
 
 // reportPrinterState queries printer status and publishes state to /api/agent/state.
@@ -1268,21 +1341,29 @@ func (a *Agent) reportState(jobID, jobState, detail string) {
 		})
 	}
 
-	// POST to upstream /api/agent/state
+	// POST to upstream /api/agent/state (serialized by stateMu inside postStatePayload)
 	go a.postStatePayload(context.Background(), jobID, jobState, detail, true)
 }
 
 // postStatePayload POSTs state to /api/agent/state according to the integration guide.
 func (a *Agent) postStatePayload(ctx context.Context, jobID, jobState, detail string, force bool) {
+	// Serialize outbound state POSTs so job state transitions cannot arrive out of order
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+
 	a.mu.Lock()
-	token := a.cfg.Token
+	cfgSnap := *a.cfg
 	backendConnected := a.backendConnected
 	fault := a.lastFault
 	info := a.lastPrinterInfo
-	job := a.lastJob
+	var jobCopy *JobReport
+	if a.lastJob != nil {
+		jc := *a.lastJob
+		jobCopy = &jc
+	}
 	a.mu.Unlock()
 
-	if token == "" || !backendConnected {
+	if cfgSnap.Token == "" || !backendConnected {
 		return
 	}
 
@@ -1306,11 +1387,11 @@ func (a *Agent) postStatePayload(ctx context.Context, jobID, jobState, detail st
 			"state":  jobState,
 			"detail": detail,
 		}
-	} else if job != nil {
+	} else if jobCopy != nil {
 		stateMap["job"] = map[string]string{
-			"id":     job.ID,
-			"state":  job.State,
-			"detail": job.Detail,
+			"id":     jobCopy.ID,
+			"state":  jobCopy.State,
+			"detail": jobCopy.Detail,
 		}
 	}
 
@@ -1333,12 +1414,12 @@ func (a *Agent) postStatePayload(ctx context.Context, jobID, jobState, detail st
 	a.lastPostedTime = time.Now()
 	a.mu.Unlock()
 
-	reqUrl := a.cfg.Endpoint(a.cfg.StatePath) + "?agentversion=" + AgentVersion
+	reqUrl := cfgSnap.Endpoint(cfgSnap.StatePath) + "?agentversion=" + AgentVersion
 	req, err := http.NewRequestWithContext(ctx, "POST", reqUrl, bytes.NewReader(body))
 	if err != nil {
 		return
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", "Bearer "+cfgSnap.Token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("agentversion", AgentVersion)
 

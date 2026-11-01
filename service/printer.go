@@ -6,10 +6,15 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 const printerPort = "9100"
+
+// printerMu serializes all TCP port 9100 operations so background status polling
+// never collides with active ZPL print jobs or ~HS / ~JP commands.
+var printerMu sync.Mutex
 
 // PrinterErrors tracks specific error states parsed from ~HQES.
 type PrinterErrors struct {
@@ -24,16 +29,31 @@ type PrinterInfo struct {
 	IP          string        `json:"ip"`
 	Serial      string        `json:"serial"`
 	Model       string        `json:"model"`
-	Type        string        `json:"type"` // always "zpl"
+	Type        string        `json:"type"`        // always "zpl"
 	LabelLength *int          `json:"labelLength"` // null if not detected/reported
 	Errors      PrinterErrors `json:"errors"`
 	Ready       bool          `json:"ready"`
 	Status      string        `json:"status"` // "online", "headOpen", "pause", "error", "offline", "unknown"
 }
 
-// QueryPrinterInfo sends ^XA^HH^XZ~HI~HQES! U1 getvar "device.unique_id"\r\n to the printer on port 9100,
-// collects the response, and parses label length, serial, model, and error bits.
+// TryQueryPrinterInfo queries the printer only if no other goroutine is currently
+// communicating with TCP port 9100. Returns (info, false) if busy.
+func TryQueryPrinterInfo(ip string) (PrinterInfo, bool) {
+	if !printerMu.TryLock() {
+		return PrinterInfo{}, false
+	}
+	defer printerMu.Unlock()
+	return queryPrinterInfoLocked(ip), true
+}
+
+// QueryPrinterInfo acquires the printer lock and queries ^HH, ~HI, ~HQES, and SGD unique_id.
 func QueryPrinterInfo(ip string) PrinterInfo {
+	printerMu.Lock()
+	defer printerMu.Unlock()
+	return queryPrinterInfoLocked(ip)
+}
+
+func queryPrinterInfoLocked(ip string) PrinterInfo {
 	info := PrinterInfo{
 		IP:     ip,
 		Type:   "zpl",
@@ -66,11 +86,14 @@ func QueryPrinterInfo(ip string) PrinterInfo {
 		if n > 0 {
 			received.Write(buf[:n])
 			str := received.String()
-			hasLabelLength := strings.Contains(str, "LABEL LENGTH")
-			hasErrors := strings.Contains(str, "ERRORS:")
-			hasSerial := strings.Count(str, "\"") >= 2 || strings.Contains(str, "SERIAL NUMBER")
-			hasModel := strings.Contains(str, ",") || strings.Contains(str, "ZD") || strings.Contains(str, "ZT")
-			if hasLabelLength && hasErrors && hasSerial && hasModel {
+
+			// Wait until we have received the complete ~HQES footer (WARNINGS + ETX)
+			// and the trailing quoted SGD response after it.
+			hqesEnd := strings.Index(str, "WARNINGS:")
+			hasCompleteHQES := hqesEnd != -1 && strings.Contains(str[hqesEnd:], "\x03")
+			hasCompleteSGD := hqesEnd != -1 && strings.Count(str[hqesEnd:], "\"") >= 2
+
+			if strings.Contains(str, "LABEL LENGTH") && hasCompleteHQES && hasCompleteSGD {
 				break
 			}
 		}
@@ -139,7 +162,7 @@ func parsePrinterData(ip, data string) PrinterInfo {
 
 	lines := strings.Split(normalized, "\n")
 
-	// 3. Parse Label Length from ^HH response: line example "  0261                LABEL LENGTH      "
+	// 3. Parse Label Length from ^HH response: line example "  0261                    LABEL LENGTH      "
 	for _, line := range lines {
 		if strings.Contains(line, "LABEL LENGTH") {
 			parts := strings.Fields(strings.TrimSpace(line))
@@ -218,36 +241,48 @@ func parsePrinterData(ip, data string) PrinterInfo {
 		}
 	}
 
-	// 6. Parse Errors from ~HQES response: line example "ERRORS: 0 0 00010004"
+	// 6. Parse Errors from ~HQES response: line example "ERRORS:         1 00000000 00010004"
 	errorsParsed := false
 	hasError := false
+	const knownMask = uint64(0x04 | 0x10000)
+
 	for _, line := range lines {
 		if strings.Contains(line, "ERRORS:") {
 			parts := strings.Fields(strings.TrimSpace(line))
 			if len(parts) >= 2 {
-				// Last field or second-to-last field with hex error bits
-				var hexStr string
-				for i := len(parts) - 1; i >= 1; i-- {
+				var combinedMask uint64
+				var parsedGroups int
+
+				for i := 1; i < len(parts); i++ {
 					p := strings.Trim(parts[i], "\x02\x03\r\n ")
 					if len(p) == 8 {
-						hexStr = p
-						break
+						if val, err := strconv.ParseUint(p, 16, 64); err == nil {
+							combinedMask |= val
+							parsedGroups++
+						}
 					}
 				}
-				if hexStr == "" {
-					hexStr = strings.Trim(parts[len(parts)-1], "\x02\x03\r\n ")
+
+				// Fallback if printer returned a single non-8-char hex token at the end
+				if parsedGroups == 0 {
+					lastToken := strings.Trim(parts[len(parts)-1], "\x02\x03\r\n ")
+					if val, err := strconv.ParseUint(lastToken, 16, 64); err == nil {
+						combinedMask = val
+						parsedGroups = 1
+					}
 				}
-				if val, err := strconv.ParseUint(hexStr, 16, 64); err == nil {
+
+				if parsedGroups > 0 {
 					errorsParsed = true
-					if val != 0 {
+					if combinedMask != 0 {
 						hasError = true
-						if (val & 0x04) != 0 {
+						if (combinedMask & 0x04) != 0 {
 							info.Errors.HeadOpen = true
 						}
-						if (val & 0x10000) != 0 {
+						if (combinedMask & 0x10000) != 0 {
 							info.Errors.Pause = true
 						}
-						if !info.Errors.HeadOpen && !info.Errors.Pause {
+						if (combinedMask &^ knownMask) != 0 {
 							info.Errors.Other = true
 						}
 					}
@@ -304,25 +339,31 @@ func (s HostStatus) Fault() string {
 }
 
 func sendZPL(ip, zpl string) error {
+	printerMu.Lock()
+	defer printerMu.Unlock()
+
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip, printerPort), 5*time.Second)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-	conn.SetWriteDeadline(time.Now().Add(15 * time.Second))
+	_ = conn.SetWriteDeadline(time.Now().Add(15 * time.Second))
 	_, err = conn.Write([]byte(zpl))
 	return err
 }
 
 // QueryStatus sends ~HS and parses the three-line response (used during print job polling).
 func QueryStatus(ip string) (HostStatus, error) {
+	printerMu.Lock()
+	defer printerMu.Unlock()
+
 	var s HostStatus
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip, printerPort), 5*time.Second)
 	if err != nil {
 		return s, err
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 	if _, err := conn.Write([]byte("~HS")); err != nil {
 		return s, err
 	}
