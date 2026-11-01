@@ -18,7 +18,7 @@ docker run --rm \
   -e CGO_ENABLED=0 \
   -e GOCACHE=/tmp/gocache \
   -e GOPATH=/tmp/gopath \
-  golang:1.24-alpine \
+  golang:1.25-alpine \
   go build -trimpath -ldflags "-s -w" -o "${OUTPUT}" .
 
 echo "[OK] ${OUTPUT} built successfully in ${SCRIPT_DIR}."
