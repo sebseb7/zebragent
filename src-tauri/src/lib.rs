@@ -5,7 +5,7 @@ use std::sync::Mutex;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use tauri::{
-    menu::{MenuBuilder, MenuItemBuilder},
+    menu::{MenuBuilder, MenuItem, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager,
 };
@@ -20,6 +20,25 @@ const EMBEDDED_AGENT: &[u8] = include_bytes!("../../service/ZebraAgent.exe");
 
 // Track spawned temporary background process
 static SPAWNED_AGENT: Mutex<Option<Child>> = Mutex::new(None);
+
+// Tray menu item for exit status info
+static EXIT_INFO_ITEM: Mutex<Option<MenuItem<tauri::Wry>>> = Mutex::new(None);
+
+fn get_exit_info_text() -> &'static str {
+    if check_is_background_installed() {
+        "Agent will keep running in background"
+    } else {
+        "This will stop the agent"
+    }
+}
+
+pub fn update_tray_exit_info() {
+    if let Ok(guard) = EXIT_INFO_ITEM.lock() {
+        if let Some(ref item) = *guard {
+            let _ = item.set_text(get_exit_info_text());
+        }
+    }
+}
 
 // Circular in-memory log buffer for ZebraAgent.exe output
 static AGENT_LOGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -390,6 +409,8 @@ async fn install_service() -> Result<String, String> {
             let _ = launch_persistent_agent();
         }
 
+        update_tray_exit_info();
+
         Ok("Installed as background service".to_string())
     })
     .await
@@ -425,6 +446,8 @@ async fn uninstall_service() -> Result<String, String> {
 
         // 5. Relaunch normally under Tauri as a regular session process
         let _ = launch_agent_from_temp();
+
+        update_tray_exit_info();
 
         Ok("Uninstalled background service".to_string())
     })
@@ -528,13 +551,21 @@ pub fn run() {
 
             // Taskbar tray icon and menu setup
             let open_item = MenuItemBuilder::with_id("open", "Open").build(app)?;
+            let exit_info_item = MenuItemBuilder::with_id("exit_info", get_exit_info_text())
+                .enabled(false)
+                .build(app)?;
             let exit_item = MenuItemBuilder::with_id("exit", "Exit").build(app)?;
 
             let tray_menu = MenuBuilder::new(app)
                 .item(&open_item)
                 .separator()
+                .item(&exit_info_item)
                 .item(&exit_item)
                 .build()?;
+
+            if let Ok(mut guard) = EXIT_INFO_ITEM.lock() {
+                *guard = Some(exit_info_item);
+            }
 
             let icon = app.default_window_icon().cloned().expect("default window icon is present");
 
@@ -562,6 +593,9 @@ pub fn run() {
                     }
                 })
                 .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click { .. } = &event {
+                        update_tray_exit_info();
+                    }
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
