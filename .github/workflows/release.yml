@@ -121,22 +121,22 @@ jobs:
         id: cache-agent
         uses: actions/cache@v6
         with:
-          path: service/zebragent
+          path: service/zebragent-linux-amd64
           key: ${{ runner.os }}-zebra-agent-${{ hashFiles('service/**/*.go', 'service/go.mod', 'service/go.sum') }}
 
       - name: Build zebragent binary (Linux Static)
         if: steps.cache-agent.outputs.cache-hit != 'true'
         working-directory: service
         run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o zebragent .
-          test -f zebragent
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o zebragent-linux-amd64 .
+          test -f zebragent-linux-amd64
 
       # --- 3. Stage & Upload Linux Artifact ---
       - name: Stage Linux Artifact
         run: |
           mkdir -p dist
-          cp service/zebragent dist/zebragent
-          chmod +x dist/zebragent
+          cp service/zebragent-linux-amd64 dist/zebragent-linux-amd64
+          chmod +x dist/zebragent-linux-amd64
 
       - name: Upload Linux build artifacts
         uses: actions/upload-artifact@v7
@@ -164,7 +164,7 @@ jobs:
           ls -la dist/
           test -f dist/zebra-agent-ui.exe
           test -f dist/ZebraAgent.exe
-          test -f dist/zebragent
+          test -f dist/zebragent-linux-amd64
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v3
@@ -172,7 +172,7 @@ jobs:
           files: |
             dist/zebra-agent-ui.exe
             dist/ZebraAgent.exe
-            dist/zebragent
+            dist/zebragent-linux-amd64
           draft: false
           prerelease: false
           generate_release_notes: true
