@@ -62,6 +62,7 @@ func (m *MonitorServer) Start(ctx context.Context) error {
 	mux.HandleFunc("/reload", m.handleReload)
 	mux.HandleFunc("/state", m.handleState)
 	mux.HandleFunc("/print", m.handlePrint)
+	mux.HandleFunc("/scan", m.handleScan)
 
 	// Wrap mux with CORS support for Tauri WebView
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -176,7 +177,7 @@ func (m *MonitorServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		case msg := <-ch:
 			data, err := json.Marshal(msg)
 			if err == nil {
-				fmt.Fprintf(w, "event: %s\ndata: %s\n\n", msg.Type, data)
+				fmt.Fprintf(w, "data: %s\n\n", data)
 				flusher.Flush()
 			}
 		}
@@ -337,4 +338,26 @@ func (m *MonitorServer) handlePrint(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"success": true, "jobId": id})
+}
+
+// handleScan scans the local network for ZPL printers on TCP port 9100.
+func (m *MonitorServer) handleScan(w http.ResponseWriter, _ *http.Request) {
+	logf("Scanning local network for ZPL printers on TCP port 9100...")
+	printers := ScanLocalZPLPrinters()
+	if m.agent != nil {
+		m.agent.mu.Lock()
+		if m.agent.printersInfo == nil {
+			m.agent.printersInfo = make(map[string]PrinterInfo)
+		}
+		for _, p := range printers {
+			m.agent.printersInfo[p.IP] = p
+		}
+		m.agent.mu.Unlock()
+	}
+	logf("Network scan complete: found %d ZPL printer(s)", len(printers))
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"success":  true,
+		"printers": printers,
+	})
 }

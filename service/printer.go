@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -418,4 +419,135 @@ func atoi(s string) int {
 	n := 0
 	fmt.Sscanf(strings.TrimSpace(s), "%d", &n)
 	return n
+}
+
+// ScanLocalZPLPrinters scans all active local IPv4 /24 subnets on TCP port 9100
+// and queries any responsive hosts with ~HI, ~HQES, and SGD device.unique_id to identify ZPL printers.
+func ScanLocalZPLPrinters() []PrinterInfo {
+	prefixes := localIPv4Prefixes()
+	if len(prefixes) == 0 {
+		return nil
+	}
+
+	var candidateIPs []string
+	seenPrefix := make(map[string]bool)
+	for _, p := range prefixes {
+		if seenPrefix[p] {
+			continue
+		}
+		seenPrefix[p] = true
+		for host := 1; host <= 254; host++ {
+			candidateIPs = append(candidateIPs, fmt.Sprintf("%s.%d", p, host))
+		}
+	}
+
+	var (
+		mu      sync.Mutex
+		found   []PrinterInfo
+		wg      sync.WaitGroup
+		sem     = make(chan struct{}, 64)
+	)
+
+	for _, ip := range candidateIPs {
+		wg.Add(1)
+		go func(targetIP string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			info, ok := probeZPLPrinter(targetIP)
+			if ok {
+				mu.Lock()
+				found = append(found, info)
+				mu.Unlock()
+			}
+		}(ip)
+	}
+
+	wg.Wait()
+
+	sort.Slice(found, func(i, j int) bool {
+		return found[i].IP < found[j].IP
+	})
+	return found
+}
+
+func localIPv4Prefixes() []string {
+	var prefixes []string
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			ip4 := ip.To4()
+			if ip4 == nil || ip4.IsLoopback() || ip4.IsLinkLocalUnicast() {
+				continue
+			}
+			// Skip common virtual/WSL/Docker internal ranges if desired, or keep standard private LANs
+			prefix := fmt.Sprintf("%d.%d.%d", ip4[0], ip4[1], ip4[2])
+			prefixes = append(prefixes, prefix)
+		}
+	}
+	return prefixes
+}
+
+// probeZPLPrinter quickly checks if TCP 9100 is open and verifies if it responds to ZPL status/ID queries.
+func probeZPLPrinter(ip string) (PrinterInfo, bool) {
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip, printerPort), 350*time.Millisecond)
+	if err != nil {
+		return PrinterInfo{}, false
+	}
+	defer conn.Close()
+
+	_ = conn.SetDeadline(time.Now().Add(1800 * time.Millisecond))
+	if _, err := conn.Write([]byte("~HI~HQES! U1 getvar \"device.unique_id\"\r\n! U1 getvar \"zpl.label_length\"\r\n")); err != nil {
+		return PrinterInfo{}, false
+	}
+
+	var received strings.Builder
+	buf := make([]byte, 4096)
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(400 * time.Millisecond))
+		n, err := conn.Read(buf)
+		if n > 0 {
+			received.Write(buf[:n])
+			str := received.String()
+			hqesEnd := strings.Index(str, "WARNINGS:")
+			hasCompleteHQES := hqesEnd != -1 && strings.Contains(str[hqesEnd:], "\x03")
+			hasSGD := hqesEnd != -1 && strings.Count(str[hqesEnd:], "\"") >= 2
+			if hasCompleteHQES && hasSGD {
+				break
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+
+	data := received.String()
+	if strings.TrimSpace(data) == "" {
+		return PrinterInfo{}, false
+	}
+
+	info := parsePrinterData(ip, data)
+	if info.Model == "" && info.Serial == "" && !strings.Contains(data, "ERRORS:") && !strings.Contains(data, "PRINTER STATUS") {
+		return PrinterInfo{}, false
+	}
+	return info, true
 }

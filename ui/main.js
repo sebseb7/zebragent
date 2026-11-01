@@ -1,26 +1,38 @@
 // Tauri v2 Core Invoke
-const tauriInvoke = window.__TAURI__ ? window.__TAURI__.core.invoke : async (cmd, args) => {
+const tauriInvoke = async (cmd, args) => {
+  if (window.__TAURI__ && window.__TAURI__.core && typeof window.__TAURI__.core.invoke === "function") {
+    return window.__TAURI__.core.invoke(cmd, args);
+  }
   console.warn("Tauri API not detected. Mocking response for:", cmd, args);
   if (cmd === "get_registry_config") {
     return {
-      api_url: "http://localhost:4209",
-      printer_ip: "",
-      zpl_printers: [],
+      api_url: "https://dashdemo.quixpos.com",
+      printer_ip: "192.168.188.47",
+      zpl_printers: ["192.168.188.47"],
       port: "41783",
       token: "40781f20191c54d8f3e72e2a72cb835f92915a645eaa7ca37f10d85dabfe3d4c",
-      local_addr: "127.0.0.1:41782",
-      name: "agent"
+      local_addr: "127.0.0.1:41783",
+      name: "warehouse-front-01"
     };
   }
   if (cmd === "get_service_status") {
-    return { running: true, background: false };
+    return { running: true, background: true };
   }
   if (cmd === "get_agent_logs") {
     return [
-      "2026/10/31 22:17:55 Local monitor listening on http://127.0.0.1:41783",
-      "2026/10/31 22:17:55 SSE connected to http://localhost:4209/api/agent/events",
-      "2026/10/31 22:17:55 Registry read [HKCU\\Software\\ZebraAgent]: ApiUrl=\"http://localhost:4209\"",
-      "2026/10/31 22:17:55 Registry read [HKCU\\Software\\ZebraAgent]: Port=\"41783\""
+      "2026/11/01 18:45:10 Local monitor listening on http://127.0.0.1:41783",
+      "2026/11/01 18:45:10 Registry read [HKCU\\Software\\ZebraAgent]: ApiUrl=\"https://dashdemo.quixpos.com\"",
+      "2026/11/01 18:45:10 Registry read [HKCU\\Software\\ZebraAgent]: ZplPrinters=[192.168.188.47]",
+      "2026/11/01 18:45:10 Registry read [HKCU\\Software\\ZebraAgent]: Port=\"41783\"",
+      "2026/11/01 18:45:11 SSE connected to https://dashdemo.quixpos.com/api/agent/events",
+      "2026/11/01 18:45:12 Printer [192.168.188.47] status: online (model=\"ZD410-200dpi\" serial=\"50J203002218\" labelLength=261 headOpen=false pause=false other=false unreachable=false)",
+      "2026/11/01 18:45:12 Posted printer state upstream: HTTP 200 (model=\"ZD410-200dpi\" serial=\"50J203002218\" type=\"zpl\" labelLength=261)"
+    ];
+  }
+  if (cmd === "scan_local_printers") {
+    return [
+      { ip: "192.168.188.47", model: "ZD410-200dpi", serial: "50J203002218", status: "online", ready: true },
+      { ip: "192.168.188.105", model: "ZT410-203dpi", serial: "42J150100123", status: "online", ready: true }
     ];
   }
   return null;
@@ -32,6 +44,7 @@ let eventSource = null;
 let eventCount = 0;
 let isBackgroundInstalled = false;
 const seenLogs = new Set();
+const printerInfoByIp = {};
 
 // DOM Elements
 const sseStatusPill = document.getElementById("sseStatusPill");
@@ -40,6 +53,8 @@ const sseStatusText = document.getElementById("sseStatusText");
 const inputApiUrl = document.getElementById("inputApiUrl");
 const zplPrintersList = document.getElementById("zplPrintersList");
 const btnAddZplPrinter = document.getElementById("btnAddZplPrinter");
+const btnScanZplPrinters = document.getElementById("btnScanZplPrinters");
+const scanResultsBox = document.getElementById("scanResultsBox");
 const inputPort = document.getElementById("inputPort");
 
 const statRunning = document.getElementById("statRunning");
@@ -76,6 +91,37 @@ function appendRawAgentLog(line) {
   if (!line || seenLogs.has(line)) return;
   seenLogs.add(line);
   if (seenLogs.size > 3000) seenLogs.clear();
+
+  // Extract printer model/serial from agent log lines if present
+  const mStatus = line.match(/Printer \[([^\]]+)\] status: (\S+) \(model="([^"]*)" serial="([^"]*)"/);
+  if (mStatus) {
+    const [, ip, status, model, serial] = mStatus;
+    if (model || serial) {
+      updatePrinterInfoMap({
+        ip,
+        status,
+        ready: status === "online",
+        model,
+        serial
+      });
+    }
+  } else {
+    const mPost = line.match(/Posted printer state upstream: .*?\(model="([^"]*)" serial="([^"]*)"/);
+    if (mPost) {
+      const [, model, serial] = mPost;
+      if (model || serial) {
+        const ips = getZplPrintersValues();
+        const ip = ips[0] || "primary";
+        updatePrinterInfoMap({
+          ip,
+          status: "online",
+          ready: true,
+          model,
+          serial
+        });
+      }
+    }
+  }
 
   eventCount++;
   if (monEventCount) monEventCount.textContent = `${eventCount} lines`;
@@ -205,15 +251,102 @@ async function unpairAgent() {
 }
 
 // Dynamic zplprinters list management
+function updatePrinterInfoMap(info) {
+  if (!info || !info.ip) return;
+  printerInfoByIp[info.ip.trim()] = info;
+  refreshPrinterUIDisplays();
+}
+
+function applySnapshotPrinters(snap) {
+  if (!snap) return;
+  if (Array.isArray(snap.printers)) {
+    snap.printers.forEach(p => {
+      if (p && p.ip) printerInfoByIp[p.ip.trim()] = p;
+    });
+  }
+  if (snap.printerIp && (snap.printerModel || snap.printerSerial || snap.printerStatus)) {
+    const ip = snap.printerIp.trim();
+    printerInfoByIp[ip] = {
+      ip,
+      model: snap.printerModel || (printerInfoByIp[ip] && printerInfoByIp[ip].model) || "",
+      serial: snap.printerSerial || (printerInfoByIp[ip] && printerInfoByIp[ip].serial) || "",
+      status: snap.printerStatus || (printerInfoByIp[ip] && printerInfoByIp[ip].status) || "",
+      ready: !!snap.printerReady
+    };
+  }
+  refreshPrinterUIDisplays();
+}
+
+function formatPrinterMeta(info) {
+  if (!info) return "";
+  const model = info.model || "";
+  const serial = info.serial || "";
+  if (!model && !serial) return "";
+  const parts = [];
+  if (model) parts.push(`Model: ${model}`);
+  if (serial) parts.push(`Serial: ${serial}`);
+  return parts.join(" | ");
+}
+
+function refreshPrinterUIDisplays() {
+  if (!zplPrintersList) return;
+  const rows = zplPrintersList.querySelectorAll(".zpl-printer-row-container");
+
+  rows.forEach((container) => {
+    const input = container.querySelector(".input-zpl-printer");
+    const metaEl = container.querySelector(".zpl-printer-meta");
+    if (!input || !metaEl) return;
+
+    const ip = input.value.trim();
+    const info = ip ? printerInfoByIp[ip] : null;
+
+    if (ip && info && (info.model || info.serial)) {
+      const isOnline = info.ready || info.status === "online";
+      const dotColor = isOnline ? "var(--success)" : (info.status === "offline" ? "var(--danger)" : "var(--warning)");
+      const model = info.model || "-";
+      const serial = info.serial || "-";
+      metaEl.style.display = "flex";
+      metaEl.innerHTML = `
+        <span style="width: 7px; height: 7px; border-radius: 50%; background: ${dotColor}; box-shadow: 0 0 6px ${dotColor}; display: inline-block; flex-shrink: 0; margin-top: 4px;"></span>
+        <div style="display: flex; flex-direction: column; gap: 2px; line-height: 1.35; flex: 1; min-width: 0;">
+          <div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"><span style="color: var(--text-dim);">Model:</span> <span style="color: var(--text-main); font-weight: 500;">${model}</span></div>
+          <div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"><span style="color: var(--text-dim);">Serial:</span> <span style="color: var(--accent);">${serial}</span></div>
+        </div>
+      `;
+    } else {
+      metaEl.style.display = "none";
+      metaEl.innerHTML = "";
+    }
+  });
+}
+
+async function fetchAgentState() {
+  const port = currentPort || (inputPort && inputPort.value.trim()) || "41783";
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/state`);
+    if (res.ok) {
+      const snap = await res.json();
+      applySnapshotPrinters(snap);
+    }
+  } catch (e) {}
+}
+
 function renderZplPrinters(printers) {
   if (!zplPrintersList) return;
   zplPrintersList.innerHTML = "";
   const list = Array.isArray(printers) && printers.length > 0 ? printers : [""];
   list.forEach(ip => addZplPrinterRow(ip));
+  refreshPrinterUIDisplays();
 }
 
 function addZplPrinterRow(ip = "") {
   if (!zplPrintersList) return;
+  const container = document.createElement("div");
+  container.className = "zpl-printer-row-container";
+  container.style.display = "flex";
+  container.style.flexDirection = "column";
+  container.style.gap = "5px";
+
   const row = document.createElement("div");
   row.className = "zpl-printer-row";
   row.style.display = "flex";
@@ -229,6 +362,7 @@ function addZplPrinterRow(ip = "") {
   input.style.flex = "1";
   input.style.padding = "5px 9px";
   input.style.fontSize = "0.84rem";
+  input.addEventListener("input", refreshPrinterUIDisplays);
 
   const btnDel = document.createElement("button");
   btnDel.type = "button";
@@ -241,15 +375,31 @@ function addZplPrinterRow(ip = "") {
   btnDel.style.borderColor = "rgba(248, 113, 113, 0.35)";
 
   btnDel.addEventListener("click", () => {
-    row.remove();
+    container.remove();
     if (zplPrintersList.children.length === 0) {
       addZplPrinterRow("");
     }
+    refreshPrinterUIDisplays();
   });
+
+  const meta = document.createElement("div");
+  meta.className = "zpl-printer-meta";
+  meta.style.display = "none";
+  meta.style.alignItems = "flex-start";
+  meta.style.gap = "8px";
+  meta.style.fontSize = "0.74rem";
+  meta.style.fontFamily = "var(--font-mono)";
+  meta.style.color = "#94a3b8";
+  meta.style.padding = "5px 9px";
+  meta.style.background = "rgba(15, 23, 42, 0.6)";
+  meta.style.border = "1px solid var(--border)";
+  meta.style.borderRadius = "var(--radius-sm)";
 
   row.appendChild(input);
   row.appendChild(btnDel);
-  zplPrintersList.appendChild(row);
+  container.appendChild(row);
+  container.appendChild(meta);
+  zplPrintersList.appendChild(container);
 }
 
 function getZplPrintersValues() {
@@ -263,11 +413,121 @@ function getZplPrintersValues() {
   return values;
 }
 
+function selectDiscoveredPrinter(info) {
+  if (!info || !info.ip) return;
+  const ip = info.ip.trim();
+  printerInfoByIp[ip] = info;
+
+  const inputs = zplPrintersList ? Array.from(zplPrintersList.querySelectorAll(".input-zpl-printer")) : [];
+  const existing = inputs.find(i => i.value.trim() === ip);
+  if (!existing) {
+    const emptyInput = inputs.find(i => i.value.trim() === "");
+    if (emptyInput) {
+      emptyInput.value = ip;
+    } else {
+      addZplPrinterRow(ip);
+    }
+  }
+  refreshPrinterUIDisplays();
+}
+
+async function scanLocalNetworkForPrinters() {
+  if (!btnScanZplPrinters) return;
+  const port = currentPort || (inputPort && inputPort.value.trim()) || "41783";
+  const origText = btnScanZplPrinters.textContent;
+  btnScanZplPrinters.disabled = true;
+  btnScanZplPrinters.textContent = "⏳ Scanning...";
+
+  try {
+    let printers = [];
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/scan`, { method: "POST" });
+      if (res.ok) {
+        const data = await res.json();
+        printers = (data && Array.isArray(data.printers)) ? data.printers : [];
+      } else {
+        throw new Error("HTTP scan unavailable");
+      }
+    } catch {
+      const tauriRes = await tauriInvoke("scan_local_printers");
+      if (Array.isArray(tauriRes)) {
+        printers = tauriRes;
+      }
+    }
+
+    printers.forEach(p => {
+      if (p && p.ip) {
+        printerInfoByIp[p.ip.trim()] = p;
+      }
+    });
+
+    if (printers.length === 0) {
+      showToast("No ZPL printers found on local network", "error");
+      if (scanResultsBox) {
+        scanResultsBox.style.display = "none";
+        scanResultsBox.innerHTML = "";
+      }
+    } else if (printers.length === 1) {
+      const p = printers[0];
+      selectDiscoveredPrinter(p);
+      showToast(`Found ${p.model || "ZPL Printer"} at ${p.ip}`);
+      if (scanResultsBox) {
+        scanResultsBox.style.display = "none";
+        scanResultsBox.innerHTML = "";
+      }
+    } else {
+      showToast(`Found ${printers.length} ZPL printers on local network`);
+      if (scanResultsBox) {
+        scanResultsBox.innerHTML = "";
+        const header = document.createElement("div");
+        header.style.display = "flex";
+        header.style.justifyContent = "space-between";
+        header.style.alignItems = "center";
+        header.style.fontSize = "0.72rem";
+        header.style.color = "var(--text-muted)";
+        header.style.marginBottom = "2px";
+        header.innerHTML = `<span>Discovered (${printers.length}): click to use</span><button type="button" style="background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:0.75rem;">✕</button>`;
+        header.querySelector("button").addEventListener("click", () => {
+          scanResultsBox.style.display = "none";
+        });
+        scanResultsBox.appendChild(header);
+
+        printers.forEach(p => {
+          const item = document.createElement("div");
+          item.style.display = "flex";
+          item.style.flexDirection = "column";
+          item.style.gap = "1px";
+          item.style.padding = "4px 7px";
+          item.style.borderRadius = "4px";
+          item.style.cursor = "pointer";
+          item.style.fontSize = "0.71rem";
+          item.style.fontFamily = "var(--font-mono)";
+          item.style.background = "rgba(30, 41, 59, 0.75)";
+          item.style.border = "1px solid rgba(51, 65, 85, 0.7)";
+          item.innerHTML = `<div style="display: flex; justify-content: space-between; align-items: center; gap: 6px; white-space: nowrap;"><span style="color: var(--accent); font-weight: 600;">${p.ip}</span><span style="color: var(--text-main); font-weight: 500; overflow: hidden; text-overflow: ellipsis;">${p.model || "ZPL"}</span></div>${p.serial ? `<div style="font-size: 0.66rem; color: var(--text-muted); white-space: nowrap;">SN: ${p.serial}</div>` : ""}`;
+          item.addEventListener("click", () => {
+            selectDiscoveredPrinter(p);
+            showToast(`Added ${p.ip} (${p.model || "ZPL"})`);
+          });
+          scanResultsBox.appendChild(item);
+        });
+        scanResultsBox.style.display = "flex";
+      }
+    }
+    refreshPrinterUIDisplays();
+  } catch (err) {
+    showToast(`Scan failed: could not reach local agent on port ${port}`, "error");
+  } finally {
+    btnScanZplPrinters.disabled = false;
+    btnScanZplPrinters.textContent = origText;
+  }
+}
+
 // Load Registry Config
 async function loadRegistryConfig() {
   try {
     const cfg = await tauriInvoke("get_registry_config");
-    inputApiUrl.value = cfg.api_url || "";
+    inputApiUrl.value = cfg.api_url || "https://dashdemo.quixpos.com";
     renderZplPrinters(cfg.zpl_printers && cfg.zpl_printers.length > 0 ? cfg.zpl_printers : (cfg.printer_ip ? [cfg.printer_ip] : []));
     inputPort.value = cfg.port || "41783";
 
@@ -343,29 +603,47 @@ function connectSSE() {
     eventSource.onopen = () => {
       setSseStatus("online", `SSE Connected (${port})`);
       appendRawAgentLog(`[SSE] Connected to ${url}`);
+      fetchAgentState();
     };
 
     eventSource.onerror = () => {
       setSseStatus("offline", "SSE Disconnected");
     };
 
-    eventSource.onmessage = (e) => {
+    const handleSsePayload = (raw) => {
       try {
-        const msg = JSON.parse(e.data);
+        const msg = JSON.parse(raw);
         if (msg.type === "paired") {
           setPairedUI(true, msg.data && msg.data.name);
           loadRegistryConfig();
+          appendTerminalLog("paired", msg.data);
         } else if (msg.type === "unpaired") {
           setPairedUI(false);
           loadRegistryConfig();
+          appendTerminalLog("unpaired", msg.data);
         } else if (msg.type === "snapshot" && msg.data) {
           setPairedUI(!!msg.data.paired, msg.data.agentName);
+          applySnapshotPrinters(msg.data);
+        } else if (msg.type === "printer" && msg.data) {
+          const prev = msg.data.ip ? printerInfoByIp[msg.data.ip.trim()] : null;
+          const prevSig = prev ? `${prev.status}|${prev.model}|${prev.serial}|${prev.labelLength}` : "";
+          const nextSig = `${msg.data.status}|${msg.data.model}|${msg.data.serial}|${msg.data.labelLength}`;
+          updatePrinterInfoMap(msg.data);
+          if (prevSig !== nextSig) {
+            appendTerminalLog("printer", msg.data);
+          }
+        } else {
+          appendTerminalLog(msg.type || "sse", msg.data);
         }
-        appendTerminalLog(msg.type || "sse", msg.data);
       } catch {
-        appendRawAgentLog(e.data);
+        appendRawAgentLog(raw);
       }
     };
+
+    eventSource.onmessage = (e) => handleSsePayload(e.data);
+    ["printer", "snapshot", "paired", "unpaired", "config", "connection", "job"].forEach(evt => {
+      eventSource.addEventListener(evt, (e) => handleSsePayload(e.data));
+    });
   } catch (e) {
     setSseStatus("offline", "SSE Failed");
   }
@@ -429,8 +707,15 @@ async function toggleBackgroundService() {
 
 // Event Listeners
 document.getElementById("btnSaveRegistry").addEventListener("click", saveRegistryConfig);
+const btnSavePrinters = document.getElementById("btnSavePrinters");
+if (btnSavePrinters) {
+  btnSavePrinters.addEventListener("click", saveRegistryConfig);
+}
 if (btnAddZplPrinter) {
   btnAddZplPrinter.addEventListener("click", () => addZplPrinterRow(""));
+}
+if (btnScanZplPrinters) {
+  btnScanZplPrinters.addEventListener("click", scanLocalNetworkForPrinters);
 }
 document.getElementById("btnClearLog").addEventListener("click", async () => {
   logTerminal.innerHTML = "";
@@ -451,6 +736,7 @@ inputPairPin.addEventListener("keydown", (e) => {
 setInterval(() => {
   checkServiceStatus();
   fetchAgentLogs();
+  fetchAgentState();
 }, 1500);
 
 // Initialize on Load
@@ -459,5 +745,6 @@ window.addEventListener("DOMContentLoaded", () => {
     loadRegistryConfig();
     checkServiceStatus();
     fetchAgentLogs();
+    fetchAgentState();
   }, 20);
 });

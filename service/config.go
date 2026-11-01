@@ -8,6 +8,7 @@ import (
 const (
 	AgentVersion  = "1"
 	AgentBasePath = "/api/agent"
+	DefaultApiUrl = "https://dashdemo.quixpos.com"
 )
 
 // Config contains the service configuration.
@@ -93,6 +94,9 @@ func LoadConfig(isService bool) (*Config, error) {
 	c.Token = strings.TrimSpace(c.Token)
 	c.PrinterIp = strings.TrimSpace(c.PrinterIp)
 	c.ApiUrl = CleanApiUrl(c.ApiUrl)
+	if c.ApiUrl == "" {
+		c.ApiUrl = DefaultApiUrl
+	}
 
 	var validPrinters []string
 	for _, p := range c.ZplPrinters {

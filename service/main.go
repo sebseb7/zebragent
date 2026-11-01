@@ -85,6 +85,7 @@ type AgentSnapshot struct {
 	Errors           PrinterErrors `json:"errors"`
 	Fault            string        `json:"fault,omitempty"`
 	LastJob          *JobReport    `json:"lastJob,omitempty"`
+	Printers         []PrinterInfo `json:"printers,omitempty"`
 }
 
 type Agent struct {
@@ -627,6 +628,32 @@ func (a *Agent) GetSnapshot() AgentSnapshot {
 		st = "unpolled"
 	}
 
+	var configuredPrinters []string
+	if len(a.cfg.ZplPrinters) > 0 {
+		configuredPrinters = append(configuredPrinters, a.cfg.ZplPrinters...)
+	} else if a.cfg.PrinterIp != "" {
+		configuredPrinters = []string{a.cfg.PrinterIp}
+	}
+
+	var printers []PrinterInfo
+	for _, p := range configuredPrinters {
+		if a.printersInfo != nil {
+			if pInfo, ok := a.printersInfo[p]; ok {
+				printers = append(printers, pInfo)
+				continue
+			}
+		}
+		if p == a.lastPrinterInfo.IP && a.lastPrinterInfo.IP != "" {
+			printers = append(printers, a.lastPrinterInfo)
+		} else {
+			printers = append(printers, PrinterInfo{
+				IP:     p,
+				Type:   "zpl",
+				Status: "unpolled",
+			})
+		}
+	}
+
 	return AgentSnapshot{
 		AgentVersion:     AgentVersion,
 		ApiUrl:           a.cfg.ApiUrl,
@@ -644,6 +671,7 @@ func (a *Agent) GetSnapshot() AgentSnapshot {
 		Errors:           a.lastPrinterInfo.Errors,
 		Fault:            a.lastFault,
 		LastJob:          a.lastJob,
+		Printers:         printers,
 	}
 }
 
@@ -1361,13 +1389,28 @@ func (a *Agent) checkAndReportPrinter(ctx context.Context, last *PrinterInfo, ha
 		a.printersInfo = make(map[string]PrinterInfo)
 	}
 	a.printersInfo[primaryIP] = info
+	a.mu.Unlock()
 
 	for _, secIP := range printers[1:] {
 		if secInfo, secOk := TryQueryPrinterInfo(secIP); secOk {
+			a.mu.Lock()
+			prevSec, hadPrev := a.printersInfo[secIP]
 			a.printersInfo[secIP] = secInfo
+			a.mu.Unlock()
+			secChanged := !hadPrev ||
+				prevSec.Model != secInfo.Model ||
+				prevSec.Serial != secInfo.Serial ||
+				prevSec.Ready != secInfo.Ready ||
+				prevSec.Status != secInfo.Status ||
+				!equalIntPtr(prevSec.LabelLength, secInfo.LabelLength) ||
+				prevSec.Errors != secInfo.Errors
+			if secChanged && a.monitor != nil {
+				a.monitor.Broadcast("printer", secInfo)
+			}
 		}
 	}
 
+	a.mu.Lock()
 	if info.Errors.HeadOpen {
 		a.lastFault = "head open"
 	} else if info.Errors.Pause {
@@ -1381,14 +1424,11 @@ func (a *Agent) checkAndReportPrinter(ctx context.Context, last *PrinterInfo, ha
 	}
 	a.mu.Unlock()
 
-	// Notify local Tauri monitor over SSE
-	if a.monitor != nil {
-		a.monitor.Broadcast("printer", info)
-	}
-
 	isInitialPoll := !*hasPolledOnce
 	changed := isInitialPoll ||
 		last.IP != info.IP ||
+		last.Model != info.Model ||
+		last.Serial != info.Serial ||
 		last.Ready != info.Ready ||
 		last.Status != info.Status ||
 		!equalIntPtr(last.LabelLength, info.LabelLength) ||
@@ -1398,12 +1438,17 @@ func (a *Agent) checkAndReportPrinter(ctx context.Context, last *PrinterInfo, ha
 		*hasPolledOnce = true
 		*last = info
 
+		// Notify local Tauri monitor over SSE when state changes
+		if a.monitor != nil {
+			a.monitor.Broadcast("printer", info)
+		}
+
 		labelLenStr := "null"
 		if info.LabelLength != nil {
 			labelLenStr = fmt.Sprintf("%d", *info.LabelLength)
 		}
-		logf("Printer [%s] status: %s (labelLength=%s headOpen=%v pause=%v other=%v unreachable=%v)",
-			info.IP, info.Status, labelLenStr,
+		logf("Printer [%s] status: %s (model=%q serial=%q labelLength=%s headOpen=%v pause=%v other=%v unreachable=%v)",
+			info.IP, info.Status, info.Model, info.Serial, labelLenStr,
 			info.Errors.HeadOpen, info.Errors.Pause, info.Errors.Other, info.Errors.Unreachable,
 		)
 

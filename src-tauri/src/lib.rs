@@ -77,6 +77,15 @@ pub struct SimpleStatus {
     pub background: bool,
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct ScannedPrinter {
+    pub ip: String,
+    pub model: String,
+    pub serial: String,
+    pub status: String,
+    pub ready: bool,
+}
+
 fn unpack_embedded_agent() -> Result<PathBuf, String> {
     let temp_dir = std::env::temp_dir().join("ZebraAgent");
     let _ = std::fs::create_dir_all(&temp_dir);
@@ -235,7 +244,7 @@ async fn get_registry_config() -> Result<RegistryConfig, String> {
             Ok(k) => k,
             Err(_) => {
                 return Ok(RegistryConfig {
-                    api_url: "http://localhost:4209".to_string(),
+                    api_url: "https://dashdemo.quixpos.com".to_string(),
                     printer_ip: String::new(),
                     zpl_printers: Vec::new(),
                     port: "41783".to_string(),
@@ -244,7 +253,16 @@ async fn get_registry_config() -> Result<RegistryConfig, String> {
             }
         };
 
-        let api_url: String = key.get_value("ApiUrl").unwrap_or_default();
+        let mut api_url: String = key.get_value("ApiUrl").unwrap_or_default();
+        if api_url.trim().is_empty() {
+            let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+            if let Ok(hklm_key) = hklm.open_subkey(r"SOFTWARE\ZebraAgent") {
+                api_url = hklm_key.get_value("ApiUrl").unwrap_or_default();
+            }
+        }
+        if api_url.trim().is_empty() {
+            api_url = "https://dashdemo.quixpos.com".to_string();
+        }
         let printer_ip: String = key.get_value("PrinterIp").unwrap_or_default();
 
         let mut zpl_printers: Vec<String> = Vec::new();
@@ -600,6 +618,148 @@ async fn unpair_agent() -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
+fn parse_zpl_probe_response(ip: &str, data: &str) -> Option<ScannedPrinter> {
+    if data.trim().is_empty() {
+        return None;
+    }
+
+    let mut serial = String::new();
+    let mut model = String::new();
+
+    for chunk in data.split('"') {
+        let c = chunk.trim();
+        if c.len() >= 6 && c.len() <= 24 && !c.contains(' ') && !c.contains("device.") {
+            serial = c.to_string();
+            break;
+        }
+    }
+
+    for token in data.split(|c| c == '\x02' || c == '\x03' || c == '\r' || c == '\n') {
+        let t = token.trim();
+        if t.contains(',') && !t.contains("ERRORS:") && !t.contains("WARNINGS:") {
+            let parts: Vec<&str> = t.split(',').collect();
+            if !parts.is_empty() && model.is_empty() {
+                let mut m = parts[0].trim();
+                if let Some(idx) = m.rfind('"') {
+                    m = m[idx + 1..].trim();
+                }
+                if !m.is_empty() {
+                    model = m.to_string();
+                }
+            }
+            if parts.len() >= 7 && serial.is_empty() {
+                let cand = parts[6].trim().trim_start_matches('+');
+                let upper = cand.to_uppercase();
+                if !upper.ends_with("KB") && !upper.ends_with("MB") && upper != "NONE" {
+                    serial = cand.to_string();
+                }
+            }
+        }
+    }
+
+    if model.is_empty() && serial.is_empty() && !data.contains("ERRORS:") && !data.contains("PRINTER STATUS") {
+        return None;
+    }
+
+    Some(ScannedPrinter {
+        ip: ip.to_string(),
+        model,
+        serial,
+        status: "online".to_string(),
+        ready: true,
+    })
+}
+
+fn get_local_ipv4_prefixes() -> Vec<String> {
+    let mut prefixes = Vec::new();
+    if let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if sock.connect("8.8.8.8:80").is_ok() {
+            if let Ok(local_addr) = sock.local_addr() {
+                if let std::net::SocketAddr::V4(v4) = local_addr {
+                    let octets = v4.ip().octets();
+                    if octets[0] != 127 {
+                        prefixes.push(format!("{}.{}.{}", octets[0], octets[1], octets[2]));
+                    }
+                }
+            }
+        }
+    }
+    prefixes
+}
+
+#[tauri::command]
+async fn scan_local_printers() -> Result<Vec<ScannedPrinter>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        use std::io::{Read, Write};
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let prefixes = get_local_ipv4_prefixes();
+        if prefixes.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut ips = Vec::new();
+        for p in prefixes {
+            for host in 1..=254 {
+                ips.push(format!("{}.{}", p, host));
+            }
+        }
+
+        let found = Arc::new(Mutex::new(Vec::new()));
+        let mut handles = Vec::new();
+
+        for chunk in ips.chunks(64) {
+            for ip_str in chunk {
+                let ip = ip_str.clone();
+                let found_clone = Arc::clone(&found);
+                handles.push(std::thread::spawn(move || {
+                    if let Ok(ipv4) = ip.parse::<Ipv4Addr>() {
+                        let addr = SocketAddr::new(IpAddr::V4(ipv4), 9100);
+                        if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(350)) {
+                            let _ = stream.set_write_timeout(Some(Duration::from_millis(800)));
+                            let _ = stream.set_read_timeout(Some(Duration::from_millis(400)));
+                            let cmd = b"~HI~HQES! U1 getvar \"device.unique_id\"\r\n";
+                            if stream.write_all(cmd).is_ok() {
+                                let mut buf = [0u8; 4096];
+                                let mut acc = String::new();
+                                let start = Instant::now();
+                                while start.elapsed() < Duration::from_millis(1600) {
+                                    match stream.read(&mut buf) {
+                                        Ok(0) => break,
+                                        Ok(n) => {
+                                            acc.push_str(&String::from_utf8_lossy(&buf[..n]));
+                                            if acc.contains("WARNINGS:") && acc.matches('"').count() >= 2 {
+                                                break;
+                                            }
+                                        }
+                                        Err(_) => break,
+                                    }
+                                }
+                                if let Some(printer) = parse_zpl_probe_response(&ip, &acc) {
+                                    if let Ok(mut list) = found_clone.lock() {
+                                        list.push(printer);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }));
+            }
+            for h in handles.drain(..) {
+                let _ = h.join();
+            }
+        }
+
+        let mut results = found.lock().unwrap().clone();
+        results.sort_by(|a, b| a.ip.cmp(&b.ip));
+        Ok(results)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -716,7 +876,8 @@ pub fn run() {
             clear_agent_logs,
             install_service,
             uninstall_service,
-            unpair_agent
+            unpair_agent,
+            scan_local_printers
         ])
         .run(tauri::generate_context!())
         .expect("error while building tauri application");

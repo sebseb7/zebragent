@@ -2,3 +2,4 @@
 *.log
 zebragent
 ZebraAgent
+node_modules
