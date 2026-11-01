@@ -19,8 +19,8 @@
   --danger-bg: rgba(239, 68, 68, 0.15);
   --info: #60a5fa;
   --font-mono: "Cascadia Code", "Consolas", "Courier New", monospace;
-  --radius: 8px;
-  --radius-sm: 5px;
+  --radius: 0px;
+  --radius-sm: 0px;
 }
 
 * {
@@ -55,9 +55,9 @@ body {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  padding: 14px 18px;
-  max-width: 1000px;
-  margin: 0 auto;
+  padding: 0;
+  max-width: 100%;
+  margin: 0;
   width: 100%;
   overflow: hidden;
 }
@@ -67,9 +67,9 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding-bottom: 16px;
+  padding: 10px 14px;
   border-bottom: 1px solid var(--border);
-  margin-bottom: 20px;
+  margin-bottom: 0;
 }
 
 .header-brand {
@@ -115,7 +115,7 @@ body {
   align-items: center;
   gap: 6px;
   padding: 4px 10px;
-  border-radius: 9999px;
+  border-radius: 0;
   font-size: 0.75rem;
   font-weight: 600;
   text-transform: uppercase;
@@ -196,9 +196,33 @@ body {
   background-color: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 20px;
-  margin-bottom: 20px;
-  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2);
+  padding: 14px;
+  margin-bottom: 0;
+  box-shadow: none;
+}
+
+.cards-grid-row > .card {
+  border-top: none;
+  border-bottom: 1px solid var(--border);
+}
+
+.cards-grid-row > .card:first-child {
+  border-left: none;
+}
+
+.cards-grid-row > .card:last-child {
+  border-right: none;
+}
+
+.cards-grid-row > .card:not(:first-child) {
+  border-left: 1px solid var(--border);
+}
+
+.card-log {
+  border-top: none;
+  border-left: none;
+  border-right: none;
+  border-bottom: none;
 }
 
 .card-header {

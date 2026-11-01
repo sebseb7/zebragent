@@ -10,37 +10,31 @@
 <body>
   <div class="app-container">
     <!-- Header -->
-    <header class="app-header" style="margin-bottom: 14px; padding-bottom: 12px;">
+    <header class="app-header">
       <div class="header-brand">
         <div class="header-icon" style="display: flex; align-items: center; justify-content: center;">
-          <img src="icon.png" alt="QZ" style="width: 32px; height: 32px; border-radius: 7px; box-shadow: 0 2px 6px rgba(0,0,0,0.35);" />
+          <img src="icon.png" alt="QZ" style="width: 32px; height: 32px; box-shadow: 0 2px 6px rgba(0,0,0,0.35);" />
         </div>
         <div class="header-title">
           <h1>Zebra Agent Manager</h1>
         </div>
       </div>
-      <div class="header-actions">
-        <div id="sseStatusPill" class="status-pill offline" title="SSE Service Runner Status">
-          <span class="status-dot"></span>
-          <span id="sseStatusText">SSE Disconnected</span>
-        </div>
-      </div>
     </header>
 
     <!-- Main Content Grid -->
-    <div style="display: flex; flex-direction: column; gap: 14px; flex: 1; overflow: hidden;">
+    <div style="display: flex; flex-direction: column; gap: 0; flex: 1; overflow: hidden;">
       <!-- Row 1: 4 dedicated cards: Connection Settings | ZPL Printers | Service | Pairing -->
-      <div style="display: grid; grid-template-columns: 1.25fr 1.25fr 0.85fr 0.9fr; gap: 12px;">
+      <div class="cards-grid-row" style="display: grid; grid-template-columns: 1.25fr 1.25fr 0.85fr 0.9fr; gap: 0;">
         <!-- Card 1: Connection Settings (Upstream URL & Downstream SSE Port) -->
         <div class="card" style="margin-bottom: 0; padding: 14px; display: flex; flex-direction: column; justify-content: space-between;">
           <form id="regForm" onsubmit="return false;" style="display: flex; flex-direction: column; justify-content: space-between; height: 100%;">
             <div style="display: flex; flex-direction: column; gap: 10px;">
               <div class="form-group">
-                <label for="inputApiUrl">QuixPOS API URL</label>
+                <label id="lblApiUrl" for="inputApiUrl">QuixPOS API URL</label>
                 <input type="text" id="inputApiUrl" placeholder="https://dashdemo.quixpos.com" autocomplete="off" style="font-size: 0.82rem; padding: 7px 10px;" />
               </div>
               <div class="form-group">
-                <label for="inputPort">local Service port</label>
+                <label id="lblPort" for="inputPort">local Service port</label>
                 <input type="number" id="inputPort" placeholder="41783" min="1024" max="65535" autocomplete="off" style="font-size: 0.84rem; padding: 7px 10px;" />
               </div>
             </div>
@@ -56,7 +50,7 @@
         <div class="card" style="margin-bottom: 0; padding: 14px; display: flex; flex-direction: column; justify-content: space-between;">
           <div style="display: flex; flex-direction: column; flex: 1; min-height: 0;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-              <label style="margin-bottom: 0;">zplprinters</label>
+              <label id="lblZplPrinters" style="margin-bottom: 0;">zplprinters</label>
               <div style="display: flex; gap: 6px; align-items: center;">
                 <button type="button" id="btnScanZplPrinters" class="btn btn-secondary btn-sm" style="font-size: 0.72rem; padding: 2px 8px; line-height: 1.2;" title="Scan local network for ZPL printers (TCP 9100)">
                   🔍 Scan
@@ -80,17 +74,17 @@
         </div>
 
         <!-- Card 3: Background Service (strictly only the 3 items) -->
-        <div class="card" style="margin-bottom: 0; padding: 16px; display: flex; flex-direction: column; justify-content: space-between;">
+        <div class="card" style="margin-bottom: 0; padding: 14px; display: flex; flex-direction: column; justify-content: space-between;">
           <div class="card-header" style="margin-bottom: 12px;">
-            <h2 class="card-title">Background Service</h2>
+            <h2 id="lblServiceTitle" class="card-title">Background Service</h2>
           </div>
           <div style="display: flex; flex-direction: column; gap: 10px;">
             <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 0.92rem;">
-              <span style="font-weight: 600;">Running:</span>
+              <span id="lblRunning" style="font-weight: 600;">Running:</span>
               <span id="statRunning" class="status-pill offline" style="padding: 3px 12px;">no</span>
             </div>
             <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 0.92rem;">
-              <span style="font-weight: 600;">Background:</span>
+              <span id="lblBackground" style="font-weight: 600;">Background:</span>
               <span id="statBackground" class="status-pill offline" style="padding: 3px 12px;">no</span>
             </div>
           </div>
@@ -105,7 +99,7 @@
         <div class="card" style="margin-bottom: 0; padding: 14px; display: flex; flex-direction: column; justify-content: space-between;">
           <div style="display: flex; flex-direction: column; gap: 10px;">
             <div style="display: flex; justify-content: space-between; align-items: center; gap: 6px; padding: 10px 12px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 0.88rem;">
-              <span style="font-weight: 600; flex-shrink: 0;">Paired:</span>
+              <span id="lblPaired" style="font-weight: 600; flex-shrink: 0;">Paired:</span>
               <span id="statPaired" class="status-pill offline" style="padding: 3px 10px; font-size: 0.72rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 145px;">no</span>
             </div>
             <!-- When Unpaired: PIN input & Pair button -->
@@ -126,7 +120,7 @@
       </div>
 
       <!-- Row 2: Live Output -->
-      <div class="card" style="margin-bottom: 0; flex: 1; display: flex; flex-direction: column; overflow: hidden;">
+      <div class="card card-log" style="margin-bottom: 0; padding: 14px; flex: 1; display: flex; flex-direction: column; overflow: hidden;">
         <div class="card-header" style="margin-bottom: 8px; justify-content: flex-end;">
           <button id="btnClearLog" class="btn btn-secondary btn-sm" title="Clear Console">
             🗑️ Clear

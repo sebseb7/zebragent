@@ -24,9 +24,44 @@ static SPAWNED_AGENT: Mutex<Option<Child>> = Mutex::new(None);
 // Tray menu item for exit status info
 static EXIT_INFO_ITEM: Mutex<Option<MenuItem<tauri::Wry>>> = Mutex::new(None);
 
+#[cfg(windows)]
+fn is_german_windows() -> bool {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetUserDefaultUILanguage() -> u16;
+    }
+    let lang_id = unsafe { GetUserDefaultUILanguage() };
+    // Primary language ID is lower 10 bits: LANG_GERMAN == 0x07
+    (lang_id & 0x03ff) == 0x07
+}
+
+#[cfg(not(windows))]
+fn is_german_windows() -> bool {
+    std::env::var("LANG")
+        .or_else(|_| std::env::var("LC_ALL"))
+        .map(|v| v.to_lowercase().starts_with("de"))
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+fn get_ui_locale() -> String {
+    if is_german_windows() {
+        "de".to_string()
+    } else {
+        "en".to_string()
+    }
+}
+
 fn get_exit_info_text() -> &'static str {
+    let is_de = is_german_windows();
     if check_is_background_installed() {
-        "Agent will keep running in background"
+        if is_de {
+            "Agent läuft im Hintergrund weiter"
+        } else {
+            "Agent will keep running in background"
+        }
+    } else if is_de {
+        "Dies beendet den Agenten"
     } else {
         "This will stop the agent"
     }
@@ -798,11 +833,14 @@ pub fn run() {
             }
 
             // Taskbar tray icon and menu setup
-            let open_item = MenuItemBuilder::with_id("open", "Open").build(app)?;
+            let is_de = is_german_windows();
+            let open_label = if is_de { "Öffnen" } else { "Open" };
+            let exit_label = if is_de { "Beenden" } else { "Exit" };
+            let open_item = MenuItemBuilder::with_id("open", open_label).build(app)?;
             let exit_info_item = MenuItemBuilder::with_id("exit_info", get_exit_info_text())
                 .enabled(false)
                 .build(app)?;
-            let exit_item = MenuItemBuilder::with_id("exit", "Exit").build(app)?;
+            let exit_item = MenuItemBuilder::with_id("exit", exit_label).build(app)?;
 
             let tray_menu = MenuBuilder::new(app)
                 .item(&open_item)
@@ -877,7 +915,8 @@ pub fn run() {
             install_service,
             uninstall_service,
             unpair_agent,
-            scan_local_printers
+            scan_local_printers,
+            get_ui_locale
         ])
         .run(tauri::generate_context!())
         .expect("error while building tauri application");

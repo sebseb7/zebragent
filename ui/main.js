@@ -35,8 +35,164 @@ const tauriInvoke = async (cmd, args) => {
       { ip: "192.168.188.105", model: "ZT410-203dpi", serial: "42J150100123", status: "online", ready: true }
     ];
   }
+  if (cmd === "get_ui_locale") {
+    return (navigator.language || "en").toLowerCase().startsWith("de") ? "de" : "en";
+  }
   return null;
 };
+
+// Localization (English default, German on German Windows)
+let currentLang = "en";
+
+const I18N = {
+  en: {
+    lblApiUrl: "QuixPOS API URL",
+    lblPort: "local Service port",
+    lblZplPrinters: "zplprinters",
+    lblServiceTitle: "Background Service",
+    lblRunning: "Running:",
+    lblBackground: "Background:",
+    lblPaired: "Paired:",
+    btnSave: "💾 Save",
+    btnScan: "🔍 Scan",
+    btnScanTitle: "Scan local network for ZPL printers (TCP 9100)",
+    btnScanning: "⏳ Scanning...",
+    btnAdd: "+ Add",
+    btnClear: "🗑️ Clear",
+    btnClearTitle: "Clear Console",
+    btnPair: "Pair",
+    btnUnpair: "Unpair Agent",
+    pinPlaceholder: "6-digit PIN",
+    printerIpPlaceholder: "e.g. 192.168.1.100",
+    removePrinterTitle: "Remove printer",
+    yes: "yes",
+    no: "no",
+    modelLabel: "Model:",
+    serialLabel: "Serial:",
+    installService: "Install as background service",
+    uninstallService: "Uninstall background service",
+    sseConnecting: (port) => `Connecting (${port})...`,
+    sseConnected: (port) => `SSE Connected (${port})`,
+    sseDisconnected: "SSE Disconnected",
+    sseFailed: "SSE Failed",
+    discoveredHeader: (count) => `Discovered (${count}): click to use`,
+    toastEnterPin: "Please enter pairing PIN",
+    toastPairedSuccess: (name) => `Paired successfully as "${name || "agent"}"!`,
+    toastPairingFailed: (err) => `Pairing failed: ${err || "Server rejected PIN"}`,
+    toastAgentUnreachable: (port, msg) => `Could not reach agent on port ${port}: ${msg}`,
+    toastUnpaired: "Agent unpaired (token cleared & connection dropped)",
+    toastUnpairError: (err) => `Unpair error: ${err}`,
+    toastNoPrintersFound: "No ZPL printers found on local network",
+    toastFoundOnePrinter: (model, ip) => `Found ${model || "ZPL Printer"} at ${ip}`,
+    toastFoundManyPrinters: (count) => `Found ${count} ZPL printers on local network`,
+    toastAddedPrinter: (ip, model) => `Added ${ip} (${model || "ZPL"})`,
+    toastScanFailed: (port) => `Scan failed: could not reach local agent on port ${port}`,
+    toastRegReadError: (err) => `Registry read error: ${err}`,
+    toastApiUrlRequired: "ApiUrl is required",
+    toastRegSaved: "Registry settings saved successfully!",
+    toastRegSaveError: (err) => `Failed to save registry: ${err}`,
+    toastServiceUninstalled: "Background service uninstalled",
+    toastServiceInstalled: "Installed as background service",
+    toastError: (err) => `Error: ${err}`
+  },
+  de: {
+    lblApiUrl: "QuixPOS API-URL",
+    lblPort: "Lokaler Dienst-Port",
+    lblZplPrinters: "ZPL-Drucker",
+    lblServiceTitle: "Hintergrunddienst",
+    lblRunning: "Aktiv:",
+    lblBackground: "Hintergrund:",
+    lblPaired: "Gekoppelt:",
+    btnSave: "💾 Speichern",
+    btnScan: "🔍 Scannen",
+    btnScanTitle: "Lokales Netzwerk nach ZPL-Druckern durchsuchen (TCP 9100)",
+    btnScanning: "⏳ Scanne...",
+    btnAdd: "+ Neu",
+    btnClear: "🗑️ Leeren",
+    btnClearTitle: "Konsole leeren",
+    btnPair: "Koppeln",
+    btnUnpair: "Agent entkoppeln",
+    pinPlaceholder: "6-stellige PIN",
+    printerIpPlaceholder: "z.B. 192.168.1.100",
+    removePrinterTitle: "Drucker entfernen",
+    yes: "ja",
+    no: "nein",
+    modelLabel: "Modell:",
+    serialLabel: "Seriennr.:",
+    installService: "Als Hintergrunddienst installieren",
+    uninstallService: "Hintergrunddienst deinstallieren",
+    sseConnecting: (port) => `Verbinde (${port})...`,
+    sseConnected: (port) => `SSE Verbunden (${port})`,
+    sseDisconnected: "SSE Getrennt",
+    sseFailed: "SSE Fehler",
+    discoveredHeader: (count) => `Gefunden (${count}): zum Auswählen klicken`,
+    toastEnterPin: "Bitte Kopplungs-PIN eingeben",
+    toastPairedSuccess: (name) => `Erfolgreich gekoppelt als "${name || "agent"}"!`,
+    toastPairingFailed: (err) => `Kopplung fehlgeschlagen: ${err || "PIN abgelehnt"}`,
+    toastAgentUnreachable: (port, msg) => `Agent auf Port ${port} nicht erreichbar: ${msg}`,
+    toastUnpaired: "Agent entkoppelt (Token gelöscht & Verbindung getrennt)",
+    toastUnpairError: (err) => `Fehler beim Entkoppeln: ${err}`,
+    toastNoPrintersFound: "Keine ZPL-Drucker im lokalen Netzwerk gefunden",
+    toastFoundOnePrinter: (model, ip) => `${model || "ZPL-Drucker"} unter ${ip} gefunden`,
+    toastFoundManyPrinters: (count) => `${count} ZPL-Drucker im lokalen Netzwerk gefunden`,
+    toastAddedPrinter: (ip, model) => `${ip} (${model || "ZPL"}) hinzugefügt`,
+    toastScanFailed: (port) => `Scan fehlgeschlagen: Agent auf Port ${port} nicht erreichbar`,
+    toastRegReadError: (err) => `Fehler beim Lesen der Registry: ${err}`,
+    toastApiUrlRequired: "API-URL ist erforderlich",
+    toastRegSaved: "Einstellungen erfolgreich gespeichert!",
+    toastRegSaveError: (err) => `Fehler beim Speichern: ${err}`,
+    toastServiceUninstalled: "Hintergrunddienst deinstalliert",
+    toastServiceInstalled: "Als Hintergrunddienst installiert",
+    toastError: (err) => `Fehler: ${err}`
+  }
+};
+
+function t(key, ...args) {
+  const dict = I18N[currentLang] || I18N.en;
+  const val = dict[key] !== undefined ? dict[key] : I18N.en[key];
+  return typeof val === "function" ? val(...args) : val;
+}
+
+function applyLocale(lang) {
+  currentLang = lang === "de" ? "de" : "en";
+  document.documentElement.lang = currentLang;
+
+  const setTxt = (id, key) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = t(key);
+  };
+
+  setTxt("lblApiUrl", "lblApiUrl");
+  setTxt("lblPort", "lblPort");
+  setTxt("lblZplPrinters", "lblZplPrinters");
+  setTxt("lblServiceTitle", "lblServiceTitle");
+  setTxt("lblRunning", "lblRunning");
+  setTxt("lblBackground", "lblBackground");
+  setTxt("lblPaired", "lblPaired");
+  setTxt("btnSaveRegistry", "btnSave");
+  setTxt("btnSavePrinters", "btnSave");
+  setTxt("btnScanZplPrinters", "btnScan");
+  setTxt("btnAddZplPrinter", "btnAdd");
+  setTxt("btnClearLog", "btnClear");
+  setTxt("btnPairAgent", "btnPair");
+  setTxt("btnUnpairAgent", "btnUnpair");
+
+  if (btnScanZplPrinters) btnScanZplPrinters.title = t("btnScanTitle");
+  const btnClearLog = document.getElementById("btnClearLog");
+  if (btnClearLog) btnClearLog.title = t("btnClearTitle");
+  if (inputPairPin) inputPairPin.placeholder = t("pinPlaceholder");
+
+  if (zplPrintersList) {
+    zplPrintersList.querySelectorAll(".input-zpl-printer").forEach(inp => {
+      inp.placeholder = t("printerIpPlaceholder");
+    });
+    zplPrintersList.querySelectorAll("button").forEach(btn => {
+      btn.title = t("removePrinterTitle");
+    });
+  }
+
+  refreshPrinterUIDisplays();
+}
 
 // State
 let currentPort = "41783";
@@ -176,12 +332,12 @@ if (window.__TAURI__ && window.__TAURI__.event) {
 // Pairing Controls
 function setPairedUI(isPaired, name) {
   if (isPaired) {
-    statPaired.textContent = name ? `yes (${name})` : "yes";
+    statPaired.textContent = name ? `${t("yes")} (${name})` : t("yes");
     statPaired.className = "status-pill online";
     pairControlBox.style.display = "none";
     unpairControlBox.style.display = "block";
   } else {
-    statPaired.textContent = "no";
+    statPaired.textContent = t("no");
     statPaired.className = "status-pill offline";
     pairControlBox.style.display = "flex";
     unpairControlBox.style.display = "none";
@@ -194,7 +350,7 @@ async function pairAgent() {
   const port = currentPort || inputPort.value.trim() || "41783";
 
   if (!pin) {
-    showToast("Please enter pairing PIN", "error");
+    showToast(t("toastEnterPin"), "error");
     return;
   }
 
@@ -211,15 +367,15 @@ async function pairAgent() {
 
     const data = await res.json();
     if (res.ok && data.success) {
-      showToast(`Paired successfully as "${data.name || 'agent'}"!`);
+      showToast(t("toastPairedSuccess", data.name));
       inputPairPin.value = "";
       setPairedUI(true, data.name);
       await loadRegistryConfig();
     } else {
-      showToast(`Pairing failed: ${data.error || 'Server rejected PIN'}`, "error");
+      showToast(t("toastPairingFailed", data.error), "error");
     }
   } catch (err) {
-    showToast(`Could not reach agent on port ${port}: ${err.message}`, "error");
+    showToast(t("toastAgentUnreachable", port, err.message), "error");
   } finally {
     btnPairAgent.disabled = false;
   }
@@ -235,7 +391,7 @@ async function unpairAgent() {
     // 2. Clear token in registry and restart agent process/service to drop connection
     await tauriInvoke("unpair_agent");
 
-    showToast("Agent unpaired (token cleared & connection dropped)");
+    showToast(t("toastUnpaired"));
     setPairedUI(false);
     await loadRegistryConfig();
 
@@ -244,7 +400,7 @@ async function unpairAgent() {
       checkServiceStatus();
     }, 600);
   } catch (err) {
-    showToast(`Unpair error: ${err}`, "error");
+    showToast(t("toastUnpairError", err), "error");
   } finally {
     btnUnpairAgent.disabled = false;
   }
@@ -283,8 +439,8 @@ function formatPrinterMeta(info) {
   const serial = info.serial || "";
   if (!model && !serial) return "";
   const parts = [];
-  if (model) parts.push(`Model: ${model}`);
-  if (serial) parts.push(`Serial: ${serial}`);
+  if (model) parts.push(`${t("modelLabel")} ${model}`);
+  if (serial) parts.push(`${t("serialLabel")} ${serial}`);
   return parts.join(" | ");
 }
 
@@ -309,8 +465,8 @@ function refreshPrinterUIDisplays() {
       metaEl.innerHTML = `
         <span style="width: 7px; height: 7px; border-radius: 50%; background: ${dotColor}; box-shadow: 0 0 6px ${dotColor}; display: inline-block; flex-shrink: 0; margin-top: 4px;"></span>
         <div style="display: flex; flex-direction: column; gap: 2px; line-height: 1.35; flex: 1; min-width: 0;">
-          <div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"><span style="color: var(--text-dim);">Model:</span> <span style="color: var(--text-main); font-weight: 500;">${model}</span></div>
-          <div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"><span style="color: var(--text-dim);">Serial:</span> <span style="color: var(--accent);">${serial}</span></div>
+          <div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"><span style="color: var(--text-dim);">${t("modelLabel")}</span> <span style="color: var(--text-main); font-weight: 500;">${model}</span></div>
+          <div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"><span style="color: var(--text-dim);">${t("serialLabel")}</span> <span style="color: var(--accent);">${serial}</span></div>
         </div>
       `;
     } else {
@@ -356,7 +512,7 @@ function addZplPrinterRow(ip = "") {
   const input = document.createElement("input");
   input.type = "text";
   input.className = "input-zpl-printer";
-  input.placeholder = "e.g. 192.168.1.100";
+  input.placeholder = t("printerIpPlaceholder");
   input.value = ip;
   input.autocomplete = "off";
   input.style.flex = "1";
@@ -368,7 +524,7 @@ function addZplPrinterRow(ip = "") {
   btnDel.type = "button";
   btnDel.className = "btn btn-outline btn-sm";
   btnDel.textContent = "✕";
-  btnDel.title = "Remove printer";
+  btnDel.title = t("removePrinterTitle");
   btnDel.style.padding = "3px 7px";
   btnDel.style.fontSize = "0.72rem";
   btnDel.style.color = "#f87171";
@@ -434,9 +590,8 @@ function selectDiscoveredPrinter(info) {
 async function scanLocalNetworkForPrinters() {
   if (!btnScanZplPrinters) return;
   const port = currentPort || (inputPort && inputPort.value.trim()) || "41783";
-  const origText = btnScanZplPrinters.textContent;
   btnScanZplPrinters.disabled = true;
-  btnScanZplPrinters.textContent = "⏳ Scanning...";
+  btnScanZplPrinters.textContent = t("btnScanning");
 
   try {
     let printers = [];
@@ -462,7 +617,7 @@ async function scanLocalNetworkForPrinters() {
     });
 
     if (printers.length === 0) {
-      showToast("No ZPL printers found on local network", "error");
+      showToast(t("toastNoPrintersFound"), "error");
       if (scanResultsBox) {
         scanResultsBox.style.display = "none";
         scanResultsBox.innerHTML = "";
@@ -470,13 +625,13 @@ async function scanLocalNetworkForPrinters() {
     } else if (printers.length === 1) {
       const p = printers[0];
       selectDiscoveredPrinter(p);
-      showToast(`Found ${p.model || "ZPL Printer"} at ${p.ip}`);
+      showToast(t("toastFoundOnePrinter", p.model, p.ip));
       if (scanResultsBox) {
         scanResultsBox.style.display = "none";
         scanResultsBox.innerHTML = "";
       }
     } else {
-      showToast(`Found ${printers.length} ZPL printers on local network`);
+      showToast(t("toastFoundManyPrinters", printers.length));
       if (scanResultsBox) {
         scanResultsBox.innerHTML = "";
         const header = document.createElement("div");
@@ -486,7 +641,7 @@ async function scanLocalNetworkForPrinters() {
         header.style.fontSize = "0.72rem";
         header.style.color = "var(--text-muted)";
         header.style.marginBottom = "2px";
-        header.innerHTML = `<span>Discovered (${printers.length}): click to use</span><button type="button" style="background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:0.75rem;">✕</button>`;
+        header.innerHTML = `<span>${t("discoveredHeader", printers.length)}</span><button type="button" style="background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:0.75rem;">✕</button>`;
         header.querySelector("button").addEventListener("click", () => {
           scanResultsBox.style.display = "none";
         });
@@ -498,7 +653,7 @@ async function scanLocalNetworkForPrinters() {
           item.style.flexDirection = "column";
           item.style.gap = "1px";
           item.style.padding = "4px 7px";
-          item.style.borderRadius = "4px";
+          item.style.borderRadius = "0";
           item.style.cursor = "pointer";
           item.style.fontSize = "0.71rem";
           item.style.fontFamily = "var(--font-mono)";
@@ -507,7 +662,7 @@ async function scanLocalNetworkForPrinters() {
           item.innerHTML = `<div style="display: flex; justify-content: space-between; align-items: center; gap: 6px; white-space: nowrap;"><span style="color: var(--accent); font-weight: 600;">${p.ip}</span><span style="color: var(--text-main); font-weight: 500; overflow: hidden; text-overflow: ellipsis;">${p.model || "ZPL"}</span></div>${p.serial ? `<div style="font-size: 0.66rem; color: var(--text-muted); white-space: nowrap;">SN: ${p.serial}</div>` : ""}`;
           item.addEventListener("click", () => {
             selectDiscoveredPrinter(p);
-            showToast(`Added ${p.ip} (${p.model || "ZPL"})`);
+            showToast(t("toastAddedPrinter", p.ip, p.model));
           });
           scanResultsBox.appendChild(item);
         });
@@ -516,10 +671,10 @@ async function scanLocalNetworkForPrinters() {
     }
     refreshPrinterUIDisplays();
   } catch (err) {
-    showToast(`Scan failed: could not reach local agent on port ${port}`, "error");
+    showToast(t("toastScanFailed", port), "error");
   } finally {
     btnScanZplPrinters.disabled = false;
-    btnScanZplPrinters.textContent = origText;
+    btnScanZplPrinters.textContent = t("btnScan");
   }
 }
 
@@ -545,7 +700,7 @@ async function loadRegistryConfig() {
       connectSSE();
     }
   } catch (err) {
-    showToast(`Registry read error: ${err}`, "error");
+    showToast(t("toastRegReadError", err), "error");
   }
 }
 
@@ -556,7 +711,7 @@ async function saveRegistryConfig() {
   const port = inputPort.value.trim();
 
   if (!apiUrl) {
-    showToast("ApiUrl is required", "error");
+    showToast(t("toastApiUrlRequired"), "error");
     return;
   }
 
@@ -567,7 +722,7 @@ async function saveRegistryConfig() {
       port: port || null
     });
 
-    showToast("Registry settings saved successfully!");
+    showToast(t("toastRegSaved"));
     appendRawAgentLog(`[Config] Saved to HKCU\\Software\\ZebraAgent: ApiUrl="${apiUrl}", zplprinters=[${zplPrinters.join(", ")}], Port="${port}"`);
     appendRawAgentLog("[Signal] Sent reload signal to running agent(s) (reloading registry & reconnecting printers)...");
 
@@ -581,7 +736,7 @@ async function saveRegistryConfig() {
       connectSSE();
     }
   } catch (err) {
-    showToast(`Failed to save registry: ${err}`, "error");
+    showToast(t("toastRegSaveError", err), "error");
   }
 }
 
@@ -595,19 +750,19 @@ function connectSSE() {
   const port = currentPort || inputPort.value.trim() || "41783";
   const url = `http://127.0.0.1:${port}/events`;
 
-  setSseStatus("warning", `Connecting (${port})...`);
+  setSseStatus("warning", t("sseConnecting", port));
 
   try {
     eventSource = new EventSource(url);
 
     eventSource.onopen = () => {
-      setSseStatus("online", `SSE Connected (${port})`);
+      setSseStatus("online", t("sseConnected", port));
       appendRawAgentLog(`[SSE] Connected to ${url}`);
       fetchAgentState();
     };
 
     eventSource.onerror = () => {
-      setSseStatus("offline", "SSE Disconnected");
+      setSseStatus("offline", t("sseDisconnected"));
     };
 
     const handleSsePayload = (raw) => {
@@ -645,13 +800,13 @@ function connectSSE() {
       eventSource.addEventListener(evt, (e) => handleSsePayload(e.data));
     });
   } catch (e) {
-    setSseStatus("offline", "SSE Failed");
+    setSseStatus("offline", t("sseFailed"));
   }
 }
 
 function setSseStatus(state, text) {
-  sseStatusPill.className = `status-pill ${state}`;
-  sseStatusText.textContent = text;
+  if (sseStatusPill) sseStatusPill.className = `status-pill ${state}`;
+  if (sseStatusText) sseStatusText.textContent = text;
 }
 
 // Background Service Status Controls
@@ -662,24 +817,24 @@ async function checkServiceStatus() {
 
     // Running: yes / no
     if (res.running) {
-      statRunning.textContent = "yes";
+      statRunning.textContent = t("yes");
       statRunning.className = "status-pill online";
     } else {
-      statRunning.textContent = "no";
+      statRunning.textContent = t("no");
       statRunning.className = "status-pill offline";
     }
 
     // Background: yes / no
     isBackgroundInstalled = !!res.background;
     if (isBackgroundInstalled) {
-      statBackground.textContent = "yes";
+      statBackground.textContent = t("yes");
       statBackground.className = "status-pill online";
-      btnToggleService.textContent = "Uninstall background service";
+      btnToggleService.textContent = t("uninstallService");
       btnToggleService.className = "btn btn-danger";
     } else {
-      statBackground.textContent = "no";
+      statBackground.textContent = t("no");
       statBackground.className = "status-pill offline";
-      btnToggleService.textContent = "Install as background service";
+      btnToggleService.textContent = t("installService");
       btnToggleService.className = "btn btn-primary";
     }
   } catch (err) {
@@ -692,13 +847,13 @@ async function toggleBackgroundService() {
   try {
     if (isBackgroundInstalled) {
       await tauriInvoke("uninstall_service");
-      showToast("Background service uninstalled");
+      showToast(t("toastServiceUninstalled"));
     } else {
       await tauriInvoke("install_service");
-      showToast("Installed as background service");
+      showToast(t("toastServiceInstalled"));
     }
   } catch (err) {
-    showToast(`Error: ${err}`, "error");
+    showToast(t("toastError", err), "error");
   } finally {
     btnToggleService.disabled = false;
     await checkServiceStatus();
@@ -741,7 +896,13 @@ setInterval(() => {
 
 // Initialize on Load
 window.addEventListener("DOMContentLoaded", () => {
-  setTimeout(() => {
+  setTimeout(async () => {
+    try {
+      const detectedLang = await tauriInvoke("get_ui_locale");
+      applyLocale(detectedLang);
+    } catch {
+      applyLocale((navigator.language || "en").toLowerCase().startsWith("de") ? "de" : "en");
+    }
     loadRegistryConfig();
     checkServiceStatus();
     fetchAgentLogs();

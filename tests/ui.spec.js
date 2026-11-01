@@ -26,6 +26,9 @@ async function setupRealisticEnvironment(page, scenario) {
           if (cmd === "scan_local_printers") {
             return scen.scannedPrinters || [];
           }
+          if (cmd === "get_ui_locale") {
+            return scen.locale || "en";
+          }
           if (cmd === "save_registry_config" || cmd === "clear_agent_logs" || cmd === "unpair_agent") {
             return null;
           }
@@ -162,7 +165,7 @@ test.describe("Zebra Agent Manager Visual Screenshot Tests", () => {
     });
 
     await page.goto(UI_INDEX_URL);
-    await expect(page.locator("#sseStatusText")).toHaveText("SSE Connected (41783)");
+    await expect(page.locator("#statPaired")).toHaveText("yes (warehouse-pack-01)");
     await expect(page.locator(".zpl-printer-meta").first()).toContainText("ZD410-200dpi");
     await expect(page.locator(".zpl-printer-meta").first()).toContainText("50J203002218");
 
@@ -235,7 +238,7 @@ test.describe("Zebra Agent Manager Visual Screenshot Tests", () => {
     });
 
     await page.goto(UI_INDEX_URL);
-    await expect(page.locator("#sseStatusText")).toHaveText("SSE Connected (41783)");
+    await expect(page.locator("#statPaired")).toHaveText("yes (shipping-dock-02)");
 
     // Click Scan button to display discovered printers list
     await page.click("#btnScanZplPrinters");
@@ -291,6 +294,71 @@ test.describe("Zebra Agent Manager Visual Screenshot Tests", () => {
     await expect(page.locator(".zpl-printer-meta").first()).toBeHidden();
 
     await expect(page).toHaveScreenshot("unpaired-default-state.png");
+  });
+
+  test("4. German Windows localization (de) renders German UI labels and statuses", async ({ page }) => {
+    await setupRealisticEnvironment(page, {
+      locale: "de",
+      sseOnline: true,
+      registryConfig: {
+        api_url: "https://dashdemo.quixpos.com",
+        printer_ip: "192.168.188.47",
+        zpl_printers: ["192.168.188.47"],
+        port: "41783",
+        token: "40781f20191c54d8f3e72e2a72cb835f92915a645eaa7ca37f10d85dabfe3d4c",
+        local_addr: "127.0.0.1:41783",
+        name: "lager-versand-01",
+      },
+      serviceStatus: {
+        running: true,
+        background: true,
+      },
+      snapshot: {
+        agentVersion: "1",
+        apiUrl: "https://dashdemo.quixpos.com",
+        paired: true,
+        agentId: 12,
+        agentName: "lager-versand-01",
+        backendConnected: true,
+        printerIp: "192.168.188.47",
+        printerModel: "ZD410-200dpi",
+        printerSerial: "50J203002218",
+        printerType: "zpl",
+        printerReady: true,
+        printerStatus: "online",
+        labelLength: 261,
+        printers: [
+          {
+            ip: "192.168.188.47",
+            model: "ZD410-200dpi",
+            serial: "50J203002218",
+            type: "zpl",
+            labelLength: 261,
+            ready: true,
+            status: "online",
+          },
+        ],
+      },
+      logs: [
+        "2026/11/01 18:45:10 Local monitor listening on http://127.0.0.1:41783",
+      ],
+    });
+
+    await page.goto(UI_INDEX_URL);
+    await expect(page.locator("#lblApiUrl")).toHaveText("QuixPOS API-URL");
+    await expect(page.locator("#lblPort")).toHaveText("Lokaler Dienst-Port");
+    await expect(page.locator("#lblZplPrinters")).toHaveText("ZPL-Drucker");
+    await expect(page.locator("#lblServiceTitle")).toHaveText("Hintergrunddienst");
+    await expect(page.locator("#lblRunning")).toHaveText("Aktiv:");
+    await expect(page.locator("#statRunning")).toHaveText("ja");
+    await expect(page.locator("#btnToggleService")).toHaveText("Hintergrunddienst deinstallieren");
+    await expect(page.locator("#lblPaired")).toHaveText("Gekoppelt:");
+    await expect(page.locator("#statPaired")).toHaveText("ja (lager-versand-01)");
+    await expect(page.locator("#btnUnpairAgent")).toHaveText("Agent entkoppeln");
+    await expect(page.locator(".zpl-printer-meta").first()).toContainText("Modell:");
+    await expect(page.locator(".zpl-printer-meta").first()).toContainText("Seriennr.:");
+
+    await expect(page).toHaveScreenshot("german-ui-state.png");
   });
 });
 
