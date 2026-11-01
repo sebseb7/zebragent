@@ -46,9 +46,10 @@ func expandHome(path string) string {
 // Preference order:
 // 1. In-memory override (e.g. from tests)
 // 2. ZEBRA_CONFIG_PATH environment variable
-// 3. ~/.whatever (if it already exists)
-// 4. ~/.zebraagent (if it already exists)
-// 5. Defaults to ~/.whatever
+// 3. $XDG_CONFIG_HOME/zebragent/config.json (or ~/.config/zebragent/config.json if existing)
+// 4. ~/.zebraagent (legacy dotfile if existing)
+// 5. ~/.whatever (legacy dotfile if existing)
+// 6. Defaults to $XDG_CONFIG_HOME/zebragent/config.json (or ~/.config/zebragent/config.json)
 func getPlatformConfigPath() string {
 	configMu.Lock()
 	override := configPathOverride
@@ -62,22 +63,44 @@ func getPlatformConfigPath() string {
 		return expandHome(env)
 	}
 
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return ".whatever"
+	home, _ := os.UserHomeDir()
+
+	// 1. Resolve XDG config path
+	var xdgConfigPath string
+	if envXDG := os.Getenv("XDG_CONFIG_HOME"); envXDG != "" {
+		xdgConfigPath = filepath.Join(expandHome(envXDG), "zebragent", "config.json")
+	} else if home != "" {
+		xdgConfigPath = filepath.Join(home, ".config", "zebragent", "config.json")
 	}
 
-	whateverPath := filepath.Join(home, ".whatever")
-	zebraPath := filepath.Join(home, ".zebraagent")
-
-	if _, err := os.Stat(whateverPath); err == nil {
-		return whateverPath
-	}
-	if _, err := os.Stat(zebraPath); err == nil {
-		return zebraPath
+	if xdgConfigPath != "" {
+		if _, err := os.Stat(xdgConfigPath); err == nil {
+			return xdgConfigPath
+		}
 	}
 
-	return whateverPath
+	// 2. Check legacy dotfile paths if they already exist
+	if home != "" {
+		zebraLegacy := filepath.Join(home, ".zebraagent")
+		if _, err := os.Stat(zebraLegacy); err == nil {
+			return zebraLegacy
+		}
+		whateverLegacy := filepath.Join(home, ".whatever")
+		if _, err := os.Stat(whateverLegacy); err == nil {
+			return whateverLegacy
+		}
+	}
+
+	// 3. Default to modern XDG config location
+	if xdgConfigPath != "" {
+		return xdgConfigPath
+	}
+
+	if home != "" {
+		return filepath.Join(home, ".config", "zebragent", "config.json")
+	}
+
+	return "config.json"
 }
 
 // readFileConfig reads and parses the JSON configuration file at path.

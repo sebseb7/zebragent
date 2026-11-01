@@ -46,14 +46,17 @@ func TestFileConfigPath(t *testing.T) {
 		t.Fatalf("expected /custom/zebra/config.json, got %q", got)
 	}
 
-	// 3. Default path uses ~/.whatever
+	// 3. Default path uses XDG path ~/.config/zebragent/config.json
 	t.Setenv("ZEBRA_CONFIG_PATH", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
 	home, err := os.UserHomeDir()
 	if err == nil && home != "" {
-		expected := filepath.Join(home, ".whatever")
 		got := getPlatformConfigPath()
-		if got != expected && got != filepath.Join(home, ".zebraagent") {
-			t.Fatalf("expected path in home dir (%q), got %q", expected, got)
+		expectedXDG := filepath.Join(home, ".config", "zebragent", "config.json")
+		expectedLegacyZebra := filepath.Join(home, ".zebraagent")
+		expectedLegacyWhatever := filepath.Join(home, ".whatever")
+		if got != expectedXDG && got != expectedLegacyZebra && got != expectedLegacyWhatever {
+			t.Fatalf("expected valid config path in home dir, got %q", got)
 		}
 	}
 }
@@ -67,9 +70,9 @@ func TestExpandHome(t *testing.T) {
 	if got := expandHome("~"); got != home {
 		t.Errorf("expandHome(~) = %q, expected %q", got, home)
 	}
-	expected := filepath.Join(home, ".whatever")
-	if got := expandHome("~/.whatever"); got != expected {
-		t.Errorf("expandHome(~/.whatever) = %q, expected %q", got, expected)
+	expected := filepath.Join(home, ".config", "zebragent", "config.json")
+	if got := expandHome("~/.config/zebragent/config.json"); got != expected {
+		t.Errorf("expandHome(~/.config/zebragent/config.json) = %q, expected %q", got, expected)
 	}
 	if got := expandHome("/absolute/path"); got != "/absolute/path" {
 		t.Errorf("expandHome(/absolute/path) = %q, expected /absolute/path", got)
@@ -78,7 +81,7 @@ func TestExpandHome(t *testing.T) {
 
 func TestFileConfigReadWriteLifecycle(t *testing.T) {
 	tmpDir := t.TempDir()
-	cfgPath := filepath.Join(tmpDir, ".whatever")
+	cfgPath := filepath.Join(tmpDir, "config.json")
 
 	// Initially non-existent file returns empty config
 	c0 := readFileConfig(cfgPath)

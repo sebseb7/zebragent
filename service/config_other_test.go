@@ -10,7 +10,7 @@ import (
 
 func TestPlatformConfig_Other(t *testing.T) {
 	tmpDir := t.TempDir()
-	testPath := filepath.Join(tmpDir, ".whatever")
+	testPath := filepath.Join(tmpDir, "config.json")
 
 	setConfigPathOverride(testPath)
 	defer setConfigPathOverride("")

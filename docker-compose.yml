@@ -1,0 +1,12 @@
+services:
+  zebragent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: zebragent:latest
+    container_name: zebragent
+    restart: unless-stopped
+    network_mode: host
+
+    volumes:
+      - ~/.config/zebragent:/config
