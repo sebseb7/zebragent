@@ -67,6 +67,10 @@ func queryPrinterInfoLocked(ip string) PrinterInfo {
 		return info
 	}
 
+	if IsBluetoothTarget(ip) {
+		return queryBLEPrinterInfoLocked(ip)
+	}
+
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip, printerPort), 3*time.Second)
 	if err != nil {
 		return info
@@ -172,6 +176,17 @@ func parsePrinterData(ip, data string) PrinterInfo {
 					info.LabelLength = &val
 					break
 				}
+			}
+		}
+	}
+	// Fallback: parse label length from SGD getvar "zpl.label_length" (quoted numeric value e.g. "261")
+	if info.LabelLength == nil {
+		for _, chunk := range strings.Split(normalized, "\"") {
+			chunk = strings.TrimSpace(chunk)
+			if n, err := strconv.Atoi(chunk); err == nil && n > 0 && n < 100000 {
+				val := n
+				info.LabelLength = &val
+				break
 			}
 		}
 	}
@@ -342,6 +357,10 @@ func sendZPL(ip, zpl string) error {
 	printerMu.Lock()
 	defer printerMu.Unlock()
 
+	if IsBluetoothTarget(ip) {
+		return sendZPLBLELocked(ip, zpl)
+	}
+
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip, printerPort), 5*time.Second)
 	if err != nil {
 		return err
@@ -356,6 +375,10 @@ func sendZPL(ip, zpl string) error {
 func QueryStatus(ip string) (HostStatus, error) {
 	printerMu.Lock()
 	defer printerMu.Unlock()
+
+	if IsBluetoothTarget(ip) {
+		return queryStatusBLELocked(ip)
+	}
 
 	var s HostStatus
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip, printerPort), 5*time.Second)

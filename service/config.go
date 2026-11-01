@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"net"
 	"strings"
 )
 
@@ -16,7 +15,7 @@ type Config struct {
 	Token        string   // persistent token obtained from pairing
 	AgentName    string   // friendly name assigned to agent
 	ApiUrl       string   // base domain only (e.g. https://api.example.com)
-	PrinterIp    string   // primary printer IP address (TCP 9100)
+	PrinterIp    string   // primary printer IP address (TCP 9100) or Bluetooth target (e.g. ble://34:14:B5:B3:89:4A or ble:auto)
 	ZplPrinters  []string // list of ZPL printer IP addresses
 	EventsPath   string   // default "/events" (appended under /api/agent)
 	StatePath    string   // default "/state" (appended under /api/agent)
@@ -95,6 +94,15 @@ func LoadConfig(isService bool) (*Config, error) {
 	c.PrinterIp = strings.TrimSpace(c.PrinterIp)
 	c.ApiUrl = CleanApiUrl(c.ApiUrl)
 
+	var validPrinters []string
+	for _, p := range c.ZplPrinters {
+		p = strings.TrimSpace(p)
+		if p != "" && IsValidPrinterTarget(p) {
+			validPrinters = append(validPrinters, p)
+		}
+	}
+	c.ZplPrinters = validPrinters
+
 	if len(c.ZplPrinters) == 0 && c.PrinterIp != "" {
 		c.ZplPrinters = []string{c.PrinterIp}
 	} else if c.PrinterIp == "" && len(c.ZplPrinters) > 0 {
@@ -114,11 +122,11 @@ func LoadConfig(isService bool) (*Config, error) {
 		c.LocalAddr = "127.0.0.1:41782"
 	}
 
-	if c.PrinterIp != "" && net.ParseIP(c.PrinterIp) == nil {
+	if c.PrinterIp != "" && !IsValidPrinterTarget(c.PrinterIp) {
 		if isService {
 			return nil, errors.New(`PrinterIp invalid in HKLM\SOFTWARE\ZebraAgent\PrinterIp`)
 		}
-		return nil, errors.New(`PrinterIp invalid (specify valid IP via -printerip or set in HKLM\SOFTWARE\ZebraAgent\PrinterIp)`)
+		return nil, errors.New(`PrinterIp invalid (specify valid IP or Bluetooth address via -printerip or set in HKLM\SOFTWARE\ZebraAgent\PrinterIp)`)
 	}
 
 	return c, nil

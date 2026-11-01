@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -401,8 +400,8 @@ func (a *Agent) getPrinterIp() string {
 // SetPrinterIp sets and persists the printer IP address.
 func (a *Agent) SetPrinterIp(ip string) error {
 	clean := strings.TrimSpace(ip)
-	if clean != "" && net.ParseIP(clean) == nil {
-		return errors.New("invalid printer IP")
+	if clean != "" && !IsValidPrinterTarget(clean) {
+		return errors.New("invalid printer IP or Bluetooth address")
 	}
 
 	a.mu.Lock()
@@ -912,7 +911,6 @@ func (a *Agent) runBackendJob(ctx context.Context, j Job) {
 		a.finishJob(jobID)
 		return
 	}
-
 	// 6. Mark completed
 	a.markJobCompleted(ctx, jobID)
 	a.reportState(j.ID, "completed", "")
